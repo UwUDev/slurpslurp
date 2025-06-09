@@ -1,5 +1,5 @@
-use crate::config::Config;
 use crate::BoxedResult;
+use crate::config::Config;
 use discord_client_structs::structs::message::{Message, MessageType};
 use discord_client_structs::structs::user::User;
 use std::error::Error;
@@ -123,7 +123,11 @@ pub async fn delete_message(msg_id: &u64, db: &Client) -> Result<(), Box<dyn Err
     Ok(())
 }
 
-pub async fn upsert_user(user: &User, db: &Client, guild_id: Option<u64>) -> Result<(), Box<dyn Error>> {
+pub async fn upsert_user(
+    user: &User,
+    db: &Client,
+    guild_id: Option<u64>,
+) -> Result<(), Box<dyn Error>> {
     let query = r#"
         INSERT INTO users (id, username, global_name, avatar, bot, banner, accent_color, flags, premium_type, public_flags, guilds)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 
@@ -146,20 +150,23 @@ pub async fn upsert_user(user: &User, db: &Client, guild_id: Option<u64>) -> Res
             END
     "#;
 
-    db.execute(query, &[
-        &(user.id as i64),
-        &user.username,
-        &user.global_name,
-        &user.avatar,
-        &user.bot,
-        &user.banner,
-        &user.accent_color.map(|v| v as i32),
-        &user.flags.map(|v| v as i32),
-        &user.premium_type.map(|v| v as i32),
-        &user.public_flags.map(|v| v as i32),
-        &guild_id.map(|id| id as i64),
-    ]).await?;
+    db.execute(
+        query,
+        &[
+            &(user.id as i64),
+            &user.username,
+            &user.global_name,
+            &user.avatar,
+            &user.bot,
+            &user.banner,
+            &user.accent_color.map(|v| v as i32),
+            &user.flags.map(|v| v as i32),
+            &user.premium_type.map(|v| v as i32),
+            &user.public_flags.map(|v| v as i32),
+            &guild_id.map(|id| id as i64),
+        ],
+    )
+    .await?;
 
     Ok(())
 }
-

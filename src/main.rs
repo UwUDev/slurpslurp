@@ -43,7 +43,6 @@ async fn main() -> BoxedResult<()> {
         None
     };
 
-
     let setup_script = include_str!("../sql_scripts/setup.sql");
     if let Some(ref db) = db_client {
         let client = db.lock().await;
@@ -51,10 +50,9 @@ async fn main() -> BoxedResult<()> {
             .batch_execute(setup_script)
             .await
             .map_err(|e| format!("Error executing setup script: {}", e))?;
-        
+
         debug!("Database setup script executed successfully");
     }
-   
 
     let tokens_content = std::fs::read_to_string("tokens.txt")
         .map_err(|e| format!("Error reading tokens.txt: {}", e))?;
