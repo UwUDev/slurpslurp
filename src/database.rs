@@ -157,7 +157,7 @@ pub async fn upsert_user(
             &user.username,
             &user.global_name,
             &user.avatar,
-            &user.bot,
+            &user.bot.unwrap_or(false),
             &user.banner,
             &user.accent_color.map(|v| v as i32),
             &user.flags.map(|v| v as i32),

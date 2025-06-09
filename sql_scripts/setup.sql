@@ -4,13 +4,13 @@ CREATE TABLE IF NOT EXISTS users
     username     TEXT NOT NULL,
     global_name  TEXT,
     avatar       TEXT,
-    bot          BOOLEAN,
+    bot          BOOLEAN NOT NULL DEFAULT FALSE,
     banner       TEXT,
     accent_color INTEGER,
     flags        INTEGER,
     premium_type INTEGER,
     public_flags INTEGER,
-    guilds       BIGINT[] DEFAULT ARRAY []::BIGINT[]
+    guilds       BIGINT[] NOT NULL DEFAULT ARRAY []::BIGINT[]
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_id ON users (id);
