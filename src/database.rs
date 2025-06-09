@@ -86,12 +86,12 @@ pub async fn upsert_message(
     db.execute(
         "INSERT INTO messages (
          id, channel_id, author_id, guild_id, content,
-         created_at, edited_at, message_type, flags,
+         edited_at, message_type, flags,
          referenced_message_id, attachments
      ) VALUES (
          $1, $2, $3, $4, $5,
          $6, $7, $8, $9,
-         $10, $11
+         $10
      )
      ON CONFLICT (id) DO UPDATE SET
          content   = EXCLUDED.content,
@@ -104,7 +104,6 @@ pub async fn upsert_message(
             &author_id,
             &guild_id,
             &msg.content,
-            &msg.created_at(),
             &msg.edited_timestamp,
             &message_type,
             &flags,

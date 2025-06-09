@@ -22,7 +22,6 @@ CREATE TABLE IF NOT EXISTS messages
     author_id                BIGINT      NOT NULL REFERENCES users (id),
     guild_id              BIGINT,
     content               TEXT,
-    created_at            TIMESTAMPTZ NOT NULL,
     edited_at             TIMESTAMPTZ,
     message_type          INT         NOT NULL,
     flags                 BIGINT      NOT NULL DEFAULT 0,
