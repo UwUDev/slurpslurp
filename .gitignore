@@ -1,0 +1,6 @@
+/target
+/tokens.txt
+/downloads/
+/.venv/
+/tests
+/config.toml

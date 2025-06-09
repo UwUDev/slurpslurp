@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Real-time Image Surveillance</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="watcher.css">
+</head>
+<body>
+<header class="header">
+    <div class="title">
+        📸 Image Surveillance System
+    </div>
+    <div class="header-controls">
+        <div class="status-panel">
+            <div class="status-item">
+                <div class="status-dot disconnected" id="connection-dot"></div>
+                <span id="connection-status">Connecting...</span>
+            </div>
+            <div class="status-item">
+                <span>Queue:</span>
+                <div class="queue-badge" id="queue-counter">0</div>
+            </div>
+        </div>
+        <button class="control-button" id="history-toggle">
+            📚 Hide History
+        </button>
+    </div>
+</header>
+<main class="main-container">
+    <div class="image-container" id="image-container">
+        <div class="placeholder" id="placeholder">
+            <div class="placeholder-icon">🖼️</div>
+            <div>Waiting for first image...</div>
+        </div>
+        <img id="image" style="display: none;" alt="Current Image">
+    </div>
+    <aside class="history-panel" id="history-panel">
+        <div class="history-stats">
+            <div class="history-count">
+                <span id="history-count">0</span> images in history
+            </div>
+        </div>
+        <div class="history-header">
+            <div class="history-title">
+                📚 History
+            </div>
+            <div class="clear-indicator" id="clear-indicator" title="Click to go live">
+                🗑️ CLEAR
+            </div>
+            <div class="live-indicator" id="live-indicator" title="Click to go live">
+                🔴 LIVE
+            </div>
+        </div>
+        <div class="history-list" id="history-list"></div>
+    </aside>
+    <div class="info-overlay" id="info-overlay">
+        <div class="info-grid">
+            <div class="info-item">
+                <div class="info-label">Filename</div>
+                <div class="info-value" id="filename">-</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">Last Modified</div>
+                <div class="info-value" id="timestamp">-</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">Status</div>
+                <div class="info-value" id="image-status">-</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">History Position</div>
+                <div class="info-value" id="history-position">-</div>
+            </div>
+        </div>
+    </div>
+</main>
+<script src="watcher.js"></script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+skip_bot_messages = true
+download_files = true
+use_db = true
+db_url = "postgres://postgres:postgres@localhost/slurpslurp"

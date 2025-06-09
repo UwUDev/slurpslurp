@@ -1,0 +1,25 @@
+[package]
+name = "slurpslurp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+discord_client_gateway = "0.2.0"
+discord_client_rest = "0.1.0"
+tokio = { version = "1", features = ["full"] }
+serde_json = "1.0.140"
+tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-serde_json-1", "with-chrono-0_4"]}
+discord_client_structs = "0.2.0"
+rquest = { version = "5.1.0", features = ["gzip", "deflate", "zstd", "brotli"] }
+rquest-util = "2.2.1"
+log = "0.4"
+pretty_env_logger = "0.5"
+lazy_static = "1.5.0"
+sanitise-file-name = "1.0.0"
+mime_guess = "2.0.5"
+tempfile = "3.20.0"
+mime = "0.3.17"
+tree_magic_mini = "3.1.6"
+urlencoding = "2.1.3"
+serde = { version = "1.0.219", features = ["derive"] }
+toml = "0.8.23"
