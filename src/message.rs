@@ -15,6 +15,7 @@ use tokio_postgres::Client;
 async fn process_message_common(
     msg: &Message,
     user: &User,
+    guild_id: Option<u64>,
     db_client: &Option<Arc<Mutex<Client>>>,
     log_content: bool,
 ) -> Result<(), Box<dyn Error>> {
@@ -31,11 +32,11 @@ async fn process_message_common(
     if let Some(db_client) = db_client {
         let db_client = db_client.lock().await;
 
-        if let Err(e) = upsert_user(user, &db_client, msg.guild_id).await {
+        if let Err(e) = upsert_user(user, &db_client, guild_id).await {
             error!("Failed to upsert user: {}", e);
         }
 
-        if let Err(e) = upsert_message(msg, &db_client).await {
+        if let Err(e) = upsert_message(msg, guild_id, &db_client).await {
             error!("Failed to save message: {}", e);
         }
     }
@@ -74,6 +75,7 @@ pub async fn process_message_create(
     process_message_common(
         &msg_create.message,
         &msg_create.message.author,
+        msg_create.guild_id,
         db_client,
         true,
     )
@@ -87,6 +89,7 @@ pub async fn process_message_update(
     process_message_common(
         &msg_update.message,
         &msg_update.message.author,
+        msg_update.guild_id,
         db_client,
         false,
     )

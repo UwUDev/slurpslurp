@@ -18,12 +18,16 @@ pub async fn connect_db() -> BoxedResult<Client> {
     Ok(client)
 }
 
-pub async fn upsert_message(msg: &Message, db: &Client) -> Result<(), Box<dyn Error>> {
+pub async fn upsert_message(
+    msg: &Message,
+    guild_id: Option<u64>,
+    db: &Client,
+) -> Result<(), Box<dyn Error>> {
     let msg_id: i64 = msg.id as i64;
     let channel_id: i64 = msg.channel_id as i64;
     let author_id: i64 = msg.author.id as i64;
     let flags: i64 = msg.flags as i64;
-    let guild_id: Option<i64> = msg.guild_id.map(|id| id as i64);
+    let guild_id: Option<i64> = guild_id.map(|id| id as i64);
 
     let referenced_id: Option<i64> = if let Some(ref_msg) = &msg.referenced_message {
         let id = ref_msg.id as i64;
