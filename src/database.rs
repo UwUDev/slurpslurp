@@ -1,6 +1,7 @@
-use crate::BoxedResult;
 use crate::config::Config;
+use crate::BoxedResult;
 use discord_client_structs::structs::message::{Message, MessageType};
+use discord_client_structs::structs::user::User;
 use std::error::Error;
 use tokio_postgres::{Client, NoTls};
 
@@ -13,41 +14,6 @@ pub async fn connect_db() -> BoxedResult<Client> {
             eprintln!("Erreur connexion DB: {}", e);
         }
     });
-
-    client
-        .execute(
-            "CREATE TABLE IF NOT EXISTS messages (
-            id BIGINT PRIMARY KEY,
-            channel_id BIGINT NOT NULL,
-            author_id BIGINT NOT NULL,
-            guild_id BIGINT,
-            content TEXT,
-            created_at TIMESTAMPTZ NOT NULL,
-            edited_at TIMESTAMPTZ,
-            message_type INT NOT NULL,
-            flags BIGINT NOT NULL DEFAULT 0,
-            referenced_message_id BIGINT REFERENCES messages(id),
-            attachments JSONB NOT NULL DEFAULT '[]'::JSONB,
-            deleted_at TIMESTAMPTZ DEFAULT NULL,
-            UNIQUE (id)
-        )",
-            &[],
-        )
-        .await?;
-
-    client
-        .execute(
-            "CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id)",
-            &[],
-        )
-        .await?;
-
-    client
-        .execute(
-            "CREATE INDEX IF NOT EXISTS idx_messages_guild ON messages(guild_id)",
-            &[],
-        )
-        .await?;
 
     Ok(client)
 }
@@ -156,3 +122,44 @@ pub async fn delete_message(msg_id: &u64, db: &Client) -> Result<(), Box<dyn Err
     .await?;
     Ok(())
 }
+
+pub async fn upsert_user(user: &User, db: &Client, guild_id: Option<u64>) -> Result<(), Box<dyn Error>> {
+    let query = r#"
+        INSERT INTO users (id, username, global_name, avatar, bot, banner, accent_color, flags, premium_type, public_flags, guilds)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 
+                CASE WHEN $11::BIGINT IS NOT NULL THEN ARRAY[$11::BIGINT] ELSE ARRAY[]::BIGINT[] END)
+        ON CONFLICT (id) DO UPDATE SET
+            username = EXCLUDED.username,
+            global_name = EXCLUDED.global_name,
+            avatar = EXCLUDED.avatar,
+            bot = EXCLUDED.bot,
+            banner = EXCLUDED.banner,
+            accent_color = EXCLUDED.accent_color,
+            flags = EXCLUDED.flags,
+            premium_type = EXCLUDED.premium_type,
+            public_flags = EXCLUDED.public_flags,
+            guilds = CASE 
+                WHEN $11::BIGINT IS NOT NULL AND NOT ($11::BIGINT = ANY(users.guilds)) THEN 
+                    array_append(users.guilds, $11::BIGINT)
+                ELSE 
+                    users.guilds
+            END
+    "#;
+
+    db.execute(query, &[
+        &(user.id as i64),
+        &user.username,
+        &user.global_name,
+        &user.avatar,
+        &user.bot,
+        &user.banner,
+        &user.accent_color.map(|v| v as i32),
+        &user.flags.map(|v| v as i32),
+        &user.premium_type.map(|v| v as i32),
+        &user.public_flags.map(|v| v as i32),
+        &guild_id.map(|id| id as i64),
+    ]).await?;
+
+    Ok(())
+}
+

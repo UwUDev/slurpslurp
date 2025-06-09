@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::database::{delete_message, upsert_message};
+use crate::database::{delete_message, upsert_message, upsert_user};
 use crate::downloader;
 use discord_client_gateway::events::structs::message::{
     MessageCreateEvent, MessageDeleteEvent, MessageUpdateEvent,
@@ -30,6 +30,10 @@ async fn process_message_common(
 
     if let Some(db_client) = db_client {
         let db_client = db_client.lock().await;
+
+        if let Err(e) = upsert_user(user, &db_client, msg.guild_id).await {
+            error!("Failed to upsert user: {}", e);
+        }
 
         if let Err(e) = upsert_message(msg, &db_client).await {
             error!("Failed to save message: {}", e);
