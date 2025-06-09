@@ -3,14 +3,18 @@
 -- The exemple shows the top 10 racist users in your db
 
 SELECT
-    COUNT(m.id) AS racism_score,
-    m.author_id
+    COUNT(m.id) as count,
+    u.username,
+    COALESCE(u.global_name, u.username) AS display_name,
+    u.id
 FROM
     messages m
+        JOIN
+    users u ON m.author_id = u.id
 WHERE
     m.content ILIKE '%nigg%'
 GROUP BY
-    m.author_id
+    u.id
 ORDER BY
-    racism_score DESC
+    count DESC
 LIMIT 10;
