@@ -4,3 +4,5 @@
 /.venv/
 /tests
 /config.toml
+__pycache__/
+
