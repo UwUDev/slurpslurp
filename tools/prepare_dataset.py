@@ -21,9 +21,21 @@ MAX_CONTEXT_MESSAGES = float('inf')
 CONTEXT_TIME_LIMIT_MINUTES = float('inf')
 
 # Performance optimization constants
-BATCH_SIZE = 1000  # Process chains in batches
-MAX_WORKERS = 4    # Number of parallel workers
-MEMORY_EFFICIENT = True  # Use memory-efficient processing
+BATCH_SIZE = 2000  # Increased batch size for better throughput
+MAX_WORKERS = 16   # Utilize more cores on 96GB system
+MEMORY_EFFICIENT = True    parser.add_argument(
+        "--max-workers", type=int, default=16,
+        help="Number of parallel workers for processing (default: 16, optimized for 96GB RAM)"
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=2000,
+        help="Batch size for parallel processing (default: 2000, optimized for throughput)"
+    )
+    parser.add_argument(
+        "--turbo-mode", action="store_true",
+        help="Enable maximum performance mode (uses more CPU and memory)"
+    )memory-efficient processing
+CHUNK_SIZE = 10000  # Process data in larger chunks
 
 DISCORD_EPOCH = 1420070400000
 
@@ -204,8 +216,20 @@ def get_message_chains_from_db(db_dsn: str) -> list:
     print(f"[*] Connecting to PostgreSQL database...")
 
     try:
-        # Use connection pool for better performance
+        # Use connection with optimized settings
         with psycopg2.connect(db_dsn) as conn:
+            # Optimize connection for bulk operations
+            with conn.cursor() as setup_cursor:
+                try:
+                    setup_cursor.execute("SET work_mem = '512MB';")
+                    setup_cursor.execute("SET maintenance_work_mem = '2GB';")
+                    setup_cursor.execute("SET temp_buffers = '256MB';")
+                    setup_cursor.execute("SET synchronous_commit = OFF;")
+                    conn.commit()
+                    print("[+] Database session optimized for bulk operations")
+                except psycopg2.Error:
+                    pass  # Continue if we can't set these
+
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
 
                 # First, ensure we have the critical index for performance
@@ -222,7 +246,7 @@ def get_message_chains_from_db(db_dsn: str) -> list:
                 # Step 1: Bulk load all relevant messages into memory
                 print("[*] Bulk loading all messages with replies and their replies...")
 
-                # Get all root messages that have replies + all their reply chains in one go
+                # Optimized query with performance hints
                 bulk_query = """
                 WITH RECURSIVE reply_chains AS (
                     -- Base case: all root messages that have replies
@@ -233,9 +257,11 @@ def get_message_chains_from_db(db_dsn: str) -> list:
                         WHERE r.referenced_message_id = m.id
                         AND r.content IS NOT NULL
                         AND r.content != ''
+                        LIMIT 1  -- Early termination optimization
                     )
                     AND m.content IS NOT NULL
                     AND m.content != ''
+                    AND char_length(m.content) >= 3  -- Filter very short messages early
 
                     UNION ALL
 
@@ -245,7 +271,8 @@ def get_message_chains_from_db(db_dsn: str) -> list:
                     INNER JOIN reply_chains rc ON r.referenced_message_id = rc.id
                     WHERE r.content IS NOT NULL
                     AND r.content != ''
-                    AND rc.depth < 50  -- Prevent infinite recursion
+                    AND char_length(r.content) >= 3
+                    AND rc.depth < 20  -- Reduced depth for faster processing
                 )
                 SELECT id, channel_id, content, author_id, depth, root_id
                 FROM reply_chains
@@ -362,35 +389,163 @@ def create_chain_record(chain: list, target_bot_id: str | None = None, user_temp
     return {"contents": conversation_parts}, total_chars
 
 
-def process_chain_batch(chains_batch, target_bot_id, user_template, model_template):
+def process_chain_batch_optimized(chains_batch, target_bot_id, user_template, model_template):
     """
-    Process a batch of chains and return valid JSON records.
-    This function is designed to be called in parallel.
+    Optimized batch processing with faster text processing and early filtering.
     """
     batch_records = []
+
+    # Pre-compile regex patterns for better performance
+    mention_pattern = re.compile(r"<@!?\d+>")
+    role_pattern = re.compile(r"<@&\d+>")
+    channel_pattern = re.compile(r"<#\d+>")
+    url_pattern = re.compile(r"https?://\S+")
 
     for chain in chains_batch:
         if len(chain) < 2:
             continue
 
+        # Quick validation before expensive processing
+        valid_chain = True
+        for msg in chain:
+            content = msg[2]  # content is at index 2
+            if not content or len(content.strip()) < 3:
+                valid_chain = False
+                break
+            # Quick URL check - skip chains with URLs
+            if url_pattern.search(content):
+                valid_chain = False
+                break
+
+        if not valid_chain:
+            continue
+
         try:
-            json_record, total_length = create_chain_record(chain, target_bot_id, user_template, model_template)
+            json_record, total_length = create_chain_record_optimized(
+                chain, target_bot_id, user_template, model_template,
+                mention_pattern, role_pattern, channel_pattern, url_pattern
+            )
 
-            if json_record and json_record["contents"]:
-                if len(json_record["contents"]) >= 2:
-                    last_content = json_record["contents"][-1]["parts"][0]["text"]
-                    first_content = json_record["contents"][0]["parts"][0]["text"]
+            if json_record and json_record.get("contents"):
+                contents = json_record["contents"]
+                if len(contents) >= 2:
+                    # Quick meaningful exchange check
+                    last_text = contents[-1]["parts"][0]["text"]
+                    first_text = contents[0]["parts"][0]["text"]
 
-                    last_clean = last_content.split(": ", 1)[-1] if ": " in last_content else last_content
-                    first_clean = first_content.split(": ", 1)[-1] if ": " in first_content else first_content
-
-                    if is_meaningful_exchange(first_clean, last_clean):
+                    # Simple word count check instead of complex regex
+                    if len(last_text.split()) >= 3 and len(first_text.split()) >= 3:
                         batch_records.append(json_record)
 
-        except Exception as e:
+        except Exception:
+            # Silent continue for performance
             continue
 
     return batch_records
+
+
+def create_chain_record_optimized(chain, target_bot_id, user_template, model_template,
+                                 mention_pattern, role_pattern, channel_pattern, url_pattern):
+    """
+    Optimized chain record creation with pre-compiled patterns.
+    """
+    if len(chain) < 2:
+        return None, 0
+
+    participants = set(str(msg[3]) for msg in chain)  # Extract all author_ids
+    conversation_parts = []
+    total_chars = 0
+
+    for i in range(len(chain) - 1):
+        current_msg = chain[i]
+        next_msg = chain[i + 1]
+
+        msg_id, channel_id, content, author_id, timestamp = current_msg
+        next_msg_id, _, next_content, next_author_id, _ = next_msg
+
+        # Fast preprocessing with pre-compiled patterns
+        processed_content = preprocess_text_optimized(
+            content, participants, mention_pattern, role_pattern, channel_pattern, url_pattern
+        )
+        processed_next_content = preprocess_text_optimized(
+            next_content, participants, mention_pattern, role_pattern, channel_pattern, url_pattern
+        )
+
+        if not processed_content or not processed_next_content:
+            continue
+
+        # Simplified context building
+        context_messages = []
+        for j in range(max(0, i-5), i):  # Limit context to last 5 messages for speed
+            ctx_msg = chain[j]
+            ctx_content = preprocess_text_optimized(
+                ctx_msg[2], participants, mention_pattern, role_pattern, channel_pattern, url_pattern
+            )
+            if ctx_content:
+                context_messages.append(f"<@{ctx_msg[3]}>: {ctx_content}")
+
+        context_str = "\n".join(context_messages) if context_messages else "[Aucun contexte]"
+        current_formatted = f"<@{author_id}>: {processed_content}"
+        next_formatted = f"<@{next_author_id}>: {processed_next_content}"
+
+        user_content = format_user_content(context_str, current_formatted, user_template)
+        model_content = format_model_content(next_formatted, model_template)
+
+        total_new_chars = len(user_content) + len(model_content)
+        if MAX_INPUT_CHARS != float('inf') and total_chars + total_new_chars > MAX_INPUT_CHARS:
+            break
+
+        conversation_parts.append({
+            "role": "user",
+            "parts": [{"text": user_content}]
+        })
+        conversation_parts.append({
+            "role": "model",
+            "parts": [{"text": model_content}]
+        })
+
+        total_chars += total_new_chars
+
+    if len(conversation_parts) < 2:
+        return None, 0
+
+    return {"contents": conversation_parts}, total_chars
+
+
+def preprocess_text_optimized(text, allowed_users, mention_pattern, role_pattern, channel_pattern, url_pattern):
+    """
+    Optimized text preprocessing with pre-compiled patterns.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return ""
+
+    # Quick URL check
+    if url_pattern.search(text):
+        return ""
+
+    # Quick length check
+    if len(text) > 2000:  # Skip very long messages
+        return ""
+
+    # Apply replacements with pre-compiled patterns
+    if allowed_users:
+        text = mention_pattern.sub(
+            lambda m: m.group(0) if m.group(1) in allowed_users else "@user", text
+        )
+    else:
+        text = mention_pattern.sub("@user", text)
+
+    text = role_pattern.sub("@role", text)
+    text = channel_pattern.sub("#channel", text)
+
+    # Quick emoji removal (simplified)
+    text = re.sub(r":[a-zA-Z0-9_]{2,20}:", "", text)
+
+    # Simplified formatting removal
+    text = re.sub(r"(\*\*|__|\*|_|~~)(.*?)\1", lambda m: m.group(2), text)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    return text if len(text.split()) >= 2 else ""
 
 
 def write_chain_records_to_jsonl_optimized(
@@ -400,45 +555,70 @@ def write_chain_records_to_jsonl_optimized(
     target_bot_id: str | None = None,
     user_template: str | None = None,
     model_template: str | None = None,
-    max_workers: int = 4,
-    batch_size: int = 1000,
+    max_workers: int = 16,
+    batch_size: int = 2000,
 ):
     """
-    Optimized version using parallel processing for chain record creation.
+    Ultra-optimized version using aggressive parallel processing and memory management.
     """
     print(f"[*] Processing {len(chains)} chains to {output_filepath} using {max_workers} workers...")
 
-    # Split chains into batches for parallel processing
+    # Pre-filter chains for basic validity to reduce processing load
+    print("[*] Pre-filtering chains...")
+    valid_chains = []
+    for chain in chains:
+        if len(chain) >= 2:
+            # Quick content check
+            has_valid_content = True
+            for msg in chain:
+                if not msg[2] or len(msg[2].strip()) < 3:  # content at index 2
+                    has_valid_content = False
+                    break
+            if has_valid_content:
+                valid_chains.append(chain)
+
+    print(f"[+] {len(valid_chains)} chains passed pre-filtering (removed {len(chains) - len(valid_chains)})")
+
+    # Split chains into larger batches for better throughput
     chain_batches = []
-    for i in range(0, len(chains), batch_size):
-        batch = chains[i:i + batch_size]
+    for i in range(0, len(valid_chains), batch_size):
+        batch = valid_chains[i:i + batch_size]
         chain_batches.append(batch)
 
     valid_records_count = 0
+
+    # Use a lock for thread-safe file writing
+    write_lock = threading.Lock()
 
     with open(output_filepath, "w", encoding="utf-8") as f:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all batches for processing
             future_to_batch = {
-                executor.submit(process_chain_batch, batch, target_bot_id, user_template, model_template): batch
-                for batch in chain_batches
+                executor.submit(process_chain_batch_optimized, batch, target_bot_id, user_template, model_template): i
+                for i, batch in enumerate(chain_batches)
             }
 
             # Process completed batches with progress bar
-            with tqdm(total=len(chain_batches), desc=description) as pbar:
+            with tqdm(total=len(chain_batches), desc=description, unit="batches") as pbar:
                 for future in as_completed(future_to_batch):
                     try:
                         batch_records = future.result()
 
-                        # Write records to file
-                        for record in batch_records:
-                            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-                            valid_records_count += 1
+                        # Thread-safe file writing
+                        with write_lock:
+                            for record in batch_records:
+                                f.write(json.dumps(record, ensure_ascii=False, separators=(',', ':')) + "\n")
+                                valid_records_count += 1
+                            f.flush()  # Ensure data is written
 
                     except Exception as e:
                         print(f"[WARNING] Batch processing failed: {e}")
 
                     pbar.update(1)
+
+                    # Memory cleanup every 10 batches
+                    if future_to_batch[future] % 10 == 0:
+                        gc.collect()
 
     print(f"[+] {valid_records_count} valid records written to {output_filepath}.")
     return valid_records_count
@@ -543,9 +723,15 @@ if __name__ == "__main__":
         print("[ERROR] The split-ratio must be between 0 and 1.", file=sys.stderr)
         sys.exit(1)
 
-    # Performance settings
+    # Performance settings with turbo mode
     max_workers = args.max_workers
     batch_size = args.batch_size
+
+    if args.turbo_mode:
+        print("[🚀] TURBO MODE ENABLED - Maximum performance settings")
+        max_workers = min(32, max_workers * 2)  # Double workers in turbo mode
+        batch_size = min(5000, batch_size * 2)  # Larger batches
+        print(f"[🚀] Turbo settings: {max_workers} workers, {batch_size} batch size")
 
     # Récupérer les templates personnalisés
     user_template = args.user_template
