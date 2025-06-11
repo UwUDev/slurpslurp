@@ -7,15 +7,24 @@ import random
 from tqdm import tqdm
 from datetime import datetime, timedelta
 
-MAX_INPUT_CHARS = float('inf')  # Aucune limite
-MAX_OUTPUT_CHARS = float('inf')  # Aucune limite
+MAX_INPUT_CHARS = float('inf')
+MAX_OUTPUT_CHARS = float('inf')
 MIN_VALIDATION_EXAMPLES = 10
 MAX_VALIDATION_EXAMPLES = 5000
 MIN_PAIRS_FOR_SPLIT = 20
-MAX_CONTEXT_MESSAGES = float('inf')  # Aucune limite
-CONTEXT_TIME_LIMIT_MINUTES = float('inf')  # Aucune limite
+MAX_CONTEXT_MESSAGES = float('inf')
+CONTEXT_TIME_LIMIT_MINUTES = float('inf')
 
-# Templates customisables pour le contenu des parts
+DISCORD_EPOCH = 1420070400000
+
+def discord_id_to_timestamp(discord_id: int) -> datetime:
+    """
+    Convertit un ID Discord en timestamp datetime.
+    Les IDs Discord contiennent un timestamp Unix avec l'époque Discord (2015-01-01).
+    """
+    timestamp_ms = (discord_id >> 22) + DISCORD_EPOCH
+    return datetime.utcfromtimestamp(timestamp_ms / 1000)
+
 USER_PART_TEMPLATE = """CONTEXT:
 {context_messages}
 ---
@@ -23,7 +32,6 @@ CURRENT: {current_message}"""
 
 MODEL_PART_TEMPLATE = """{response_message}"""
 
-# Fonctions pour utiliser les templates
 def format_user_content(context_messages: str, current_message: str, template: str | None = None) -> str:
     """Formate le contenu user avec le template."""
     if template is None:
@@ -55,22 +63,17 @@ def preprocess_text(text: str, allowed_users: set | None = None) -> str:
     else:
         text = re.sub(r"<@!?\d+>", "@user", text)
 
-    # Unknown users and roles
     text = re.sub(r"<@&\d+>", "@role", text)
     text = re.sub(r"<#\d+>", "#channel", text)
 
-    # Disallow URLs
     if re.search(r"https?://\S+", text):
         return ""
 
-    # Disallow code blocks (to avoid people asking "CaN yOu Do My HoMeWoRk?")
     if re.search(r"``````", text, flags=re.DOTALL):
         return ""
 
-    # Remove custom Discord emojis
     text = re.sub(r":[a-zA-Z0-9-_]{3,32}:", "", text)
 
-    # Remove Markdown formatting etc..
     text = re.sub(r"(\*\*|__|\*|_|~~)(.*?)\1", r"\2", text)
     text = re.sub(r"<a?:(\w+):\d+>", r":\1:", text)
     text = re.sub(r"\s+", " ", text).strip()
@@ -82,7 +85,6 @@ def is_meaningful_exchange(input_text: str, output_text: str) -> bool:
     if len(output_text.split()) < 3:
         return False
 
-    # Messages with only special characters or numbers are useless
     reaction_patterns = [r'^[!@#$%^&*()_+\-=\[\]{};:"\\|,.<>\/?]+$', r"^[0-9]+$"]
 
     if any(
@@ -103,39 +105,42 @@ def get_conversation_context(
     message_timestamp,
     max_context: int | float = MAX_CONTEXT_MESSAGES,
 ) -> list:
-    # Pas de limite de temps si CONTEXT_TIME_LIMIT_MINUTES est infini
-    if CONTEXT_TIME_LIMIT_MINUTES == float('inf'):
-        time_limit = datetime.min  # Date très ancienne pour récupérer tout
-    else:
-        time_limit = message_timestamp - timedelta(minutes=CONTEXT_TIME_LIMIT_MINUTES)
-
-    # Construire la requête avec ou sans LIMIT
     if max_context == float('inf'):
         query = """
-        SELECT content, author_id, created_at
+        SELECT content, author_id, id
         FROM messages
         WHERE channel_id = %s
         AND id < %s
         AND content IS NOT NULL
         AND content != ''
-        AND created_at >= %s
         ORDER BY id DESC
         """
-        cursor.execute(query, (channel_id, message_id, time_limit))
+        cursor.execute(query, (channel_id, message_id))
     else:
         query = """
-        SELECT content, author_id, created_at
+        SELECT content, author_id, id
         FROM messages
         WHERE channel_id = %s
         AND id < %s
         AND content IS NOT NULL
         AND content != ''
-        AND created_at >= %s
         ORDER BY id DESC
         LIMIT %s
         """
-        cursor.execute(query, (channel_id, message_id, time_limit, max_context))
-    return list(reversed(cursor.fetchall()))
+        cursor.execute(query, (channel_id, message_id, max_context))
+
+    results = cursor.fetchall()
+    if CONTEXT_TIME_LIMIT_MINUTES != float('inf'):
+        time_limit = message_timestamp - timedelta(minutes=CONTEXT_TIME_LIMIT_MINUTES)
+        filtered_results = []
+        for content, author_id, msg_id in results:
+            msg_timestamp = discord_id_to_timestamp(msg_id)
+            if msg_timestamp >= time_limit:
+                filtered_results.append((content, author_id, msg_timestamp))
+        return list(reversed(filtered_results))
+    else:
+        return list(reversed([(content, author_id, discord_id_to_timestamp(msg_id))
+                             for content, author_id, msg_id in results]))
 
 
 def get_conversation_participants(
@@ -157,56 +162,52 @@ def get_extended_context(
     invalid_messages: set,
     max_context: int | float = MAX_CONTEXT_MESSAGES,
 ) -> list:
-    # Pas de limite de temps si CONTEXT_TIME_LIMIT_MINUTES est infini
-    if CONTEXT_TIME_LIMIT_MINUTES == float('inf'):
-        time_limit = datetime.min  # Date très ancienne pour récupérer tout
-    else:
-        time_limit = message_timestamp - timedelta(minutes=CONTEXT_TIME_LIMIT_MINUTES)
-
-    # Pas de limite si max_context est infini
     if max_context == float('inf'):
-        extended_limit = None  # Pas de limite
+        extended_limit = None
     else:
         extended_limit = max_context * 2
 
-    # Construire la requête avec ou sans LIMIT
     if extended_limit is None:
         query = """
-        SELECT content, author_id, created_at, id
+        SELECT content, author_id, id
         FROM messages
         WHERE channel_id = %s
         AND id < %s
         AND content IS NOT NULL
         AND content != ''
-        AND created_at >= %s
         ORDER BY id DESC
         """
-        cursor.execute(query, (channel_id, message_id, time_limit))
+        cursor.execute(query, (channel_id, message_id))
     else:
         query = """
-        SELECT content, author_id, created_at, id
+        SELECT content, author_id, id
         FROM messages
         WHERE channel_id = %s
         AND id < %s
         AND content IS NOT NULL
         AND content != ''
-        AND created_at >= %s
         ORDER BY id DESC
         LIMIT %s
         """
-        cursor.execute(query, (channel_id, message_id, time_limit, extended_limit))
+        cursor.execute(query, (channel_id, message_id, extended_limit))
     all_potential_messages = list(reversed(cursor.fetchall()))
 
     valid_context = []
-    for msg_content, author_id, timestamp, msg_id in all_potential_messages:
+    for msg_content, author_id, msg_id in all_potential_messages:
         if msg_id in invalid_messages:
             continue
+
+        timestamp = discord_id_to_timestamp(msg_id)
+
+        if CONTEXT_TIME_LIMIT_MINUTES != float('inf'):
+            time_limit = message_timestamp - timedelta(minutes=CONTEXT_TIME_LIMIT_MINUTES)
+            if timestamp < time_limit:
+                continue
 
         processed_msg = preprocess_text(msg_content)
         if processed_msg and len(processed_msg.split()) >= 2:
             valid_context.append((msg_content, author_id, timestamp))
 
-        # Ne pas limiter si max_context est infini
         if max_context != float('inf') and len(valid_context) >= max_context:
             break
 
@@ -222,9 +223,8 @@ def get_message_chains_from_db(db_dsn: str) -> list:
     try:
         with psycopg2.connect(db_dsn) as conn:
             with conn.cursor() as cursor:
-                # D'abord, récupérer tous les messages qui ont au moins une réponse
                 query_root_messages = """
-                SELECT DISTINCT m.id, m.channel_id, m.content, m.author_id, m.created_at
+                SELECT DISTINCT m.id, m.channel_id, m.content, m.author_id
                 FROM messages m
                 WHERE EXISTS (
                     SELECT 1 FROM messages r
@@ -234,17 +234,22 @@ def get_message_chains_from_db(db_dsn: str) -> list:
                 )
                 AND m.content IS NOT NULL
                 AND m.content != ''
-                ORDER BY m.created_at DESC;
+                ORDER BY m.id DESC;
                 """
                 cursor.execute(query_root_messages)
                 root_messages = cursor.fetchall()
-                print(f"[+] {len(root_messages)} messages with replies found.")
 
-                # Pour chaque message racine, construire la chaîne complète de réponses
+                root_messages_with_timestamps = []
+                for msg_id, channel_id, content, author_id in root_messages:
+                    timestamp = discord_id_to_timestamp(msg_id)
+                    root_messages_with_timestamps.append((msg_id, channel_id, content, author_id, timestamp))
+
+                print(f"[+] {len(root_messages_with_timestamps)} messages with replies found.")
+
                 all_chains = []
-                for root_msg in tqdm(root_messages, desc="Building reply chains"):
+                for root_msg in tqdm(root_messages_with_timestamps, desc="Building reply chains"):
                     chain = build_reply_chain(cursor, root_msg)
-                    if len(chain) >= 2:  # Au moins un message + une réponse
+                    if len(chain) >= 2:
                         all_chains.append(chain)
 
                 print(f"[+] {len(all_chains)} complete reply chains built.")
@@ -264,14 +269,13 @@ def build_reply_chain(cursor, root_message: tuple) -> list:
     current_msg_id = root_message[0]
 
     while True:
-        # Chercher toutes les réponses directes au message courant
         query_replies = """
-        SELECT id, channel_id, content, author_id, created_at
+        SELECT id, channel_id, content, author_id
         FROM messages
         WHERE referenced_message_id = %s
         AND content IS NOT NULL
         AND content != ''
-        ORDER BY created_at ASC;
+        ORDER BY id ASC;
         """
         cursor.execute(query_replies, (current_msg_id,))
         replies = cursor.fetchall()
@@ -279,12 +283,14 @@ def build_reply_chain(cursor, root_message: tuple) -> list:
         if not replies:
             break
 
-        # Ajouter toutes les réponses à la chaîne
-        chain.extend(replies)
+        replies_with_timestamps = []
+        for msg_id, channel_id, content, author_id in replies:
+            timestamp = discord_id_to_timestamp(msg_id)
+            replies_with_timestamps.append((msg_id, channel_id, content, author_id, timestamp))
 
-        # Pour continuer la chaîne, prendre le dernier message ajouté
-        # (celui qui pourrait avoir des réponses à son tour)
-        current_msg_id = replies[-1][0]
+        chain.extend(replies_with_timestamps)
+
+        current_msg_id = replies_with_timestamps[-1][0]
 
     return chain
 
@@ -297,15 +303,13 @@ def create_chain_record(chain: list, target_bot_id: str | None = None, user_temp
     if len(chain) < 2:
         return None, 0
 
-    # Obtenir tous les participants de la chaîne
     participants = set()
     for msg in chain:
-        participants.add(str(msg[3]))  # author_id est à l'index 3
+        participants.add(str(msg[3]))
 
     conversation_parts = []
     total_chars = 0
 
-    # Traiter chaque paire de messages (contexte + réponse)
     for i in range(len(chain) - 1):
         current_msg = chain[i]
         next_msg = chain[i + 1]
@@ -319,9 +323,8 @@ def create_chain_record(chain: list, target_bot_id: str | None = None, user_temp
         if not processed_content or not processed_next_content:
             continue
 
-        # Construire le contexte (messages précédents) - TOUS les messages précédents
         context_messages = []
-        for j in range(0, i):  # Prendre TOUS les messages précédents
+        for j in range(0, i):
             ctx_msg = chain[j]
             ctx_content = preprocess_text(ctx_msg[2], participants)
             if ctx_content:
@@ -331,7 +334,6 @@ def create_chain_record(chain: list, target_bot_id: str | None = None, user_temp
         current_formatted = f"<@{author_id}>: {processed_content}"
         next_formatted = f"<@{next_author_id}>: {processed_next_content}"
 
-        # Déterminer les rôles
         user_role = "user"
         model_role = "model"
         if target_bot_id:
@@ -341,16 +343,13 @@ def create_chain_record(chain: list, target_bot_id: str | None = None, user_temp
                 model_role = "user"
                 user_role = "user"
 
-        # Formater avec les templates
         user_content = format_user_content(context_str, current_formatted, user_template)
         model_content = format_model_content(next_formatted, model_template)
 
-        # Vérifier la limite de caractères (ne pas limiter si MAX_INPUT_CHARS est infini)
         total_new_chars = len(user_content) + len(model_content)
         if MAX_INPUT_CHARS != float('inf') and total_chars + total_new_chars > MAX_INPUT_CHARS:
             break
 
-        # Ajouter la paire user/model
         conversation_parts.append({
             "role": user_role,
             "parts": [{"text": user_content}]
@@ -391,13 +390,10 @@ def write_chain_records_to_jsonl(
                 json_record, total_length = create_chain_record(chain, target_bot_id, user_template, model_template)
 
                 if json_record and json_record["contents"]:
-                    # Vérifier que la chaîne contient au moins un échange significatif
                     if len(json_record["contents"]) >= 2:
-                        # Vérifier que le dernier message est une réponse significative
                         last_content = json_record["contents"][-1]["parts"][0]["text"]
                         first_content = json_record["contents"][0]["parts"][0]["text"]
 
-                        # Extraire le contenu sans les mentions pour la vérification
                         last_clean = last_content.split(": ", 1)[-1] if ": " in last_content else last_content
                         first_clean = first_content.split(": ", 1)[-1] if ": " in first_content else first_content
 
