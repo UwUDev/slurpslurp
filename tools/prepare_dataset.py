@@ -344,76 +344,88 @@ def get_message_chains_from_db(db_dsn: str) -> list:
         print(f"[ERROR] PostgreSQL database error: {e}", file=sys.stderr)
         sys.exit(1)
 
-def create_chain_record_optimized(chain, target_bot_id, user_template, model_template,
-                                 mention_pattern, role_pattern, channel_pattern, url_pattern):
+def create_single_pair_record(chain, target_bot_id, mention_pattern, role_pattern, channel_pattern, url_pattern):
     """
-    Ultra-optimized chain record creation with pre-compiled patterns.
+    Create a single user/model pair from a complete conversation chain.
+    The target (AI) is automatically detected as the last person who spoke in the chain.
+    Format: One user entry with context + current message, one model entry with AI response only.
     """
     if len(chain) < 2:
         return None, 0
 
     participants = set(str(msg[3]) for msg in chain)
-    conversation_parts = []
-    total_chars = 0
 
-    for i in range(len(chain) - 1):
-        current_msg = chain[i]
-        next_msg = chain[i + 1]
-
-        msg_id, channel_id, content, author_id, timestamp = current_msg
-        next_msg_id, _, next_content, next_author_id, _ = next_msg
-
-        # Fast preprocessing with pre-compiled patterns
+    # Clean and filter all messages
+    clean_messages = []
+    for msg in chain:
+        msg_id, channel_id, content, author_id, timestamp = msg
         processed_content = preprocess_text_optimized(
             content, participants, mention_pattern, role_pattern, channel_pattern, url_pattern
         )
-        processed_next_content = preprocess_text_optimized(
-            next_content, participants, mention_pattern, role_pattern, channel_pattern, url_pattern
-        )
 
-        if not processed_content or not processed_next_content:
-            continue
+        if processed_content:
+            clean_messages.append((msg_id, processed_content, author_id, timestamp))
 
-        # Simplified context building (limit to last 5 messages for speed)
-        context_messages = []
-        for j in range(max(0, i-5), i):
-            ctx_msg = chain[j]
-            ctx_content = preprocess_text_optimized(
-                ctx_msg[2], participants, mention_pattern, role_pattern, channel_pattern, url_pattern
-            )
-            if ctx_content:
-                context_messages.append(f"<@{ctx_msg[3]}>: {ctx_content}")
-
-        context_str = "\n".join(context_messages) if context_messages else "[No context]"
-        current_formatted = f"<@{author_id}>: {processed_content}"
-        next_formatted = f"<@{next_author_id}>: {processed_next_content}"
-
-        user_content = format_user_content(context_str, current_formatted, user_template)
-        model_content = format_model_content(next_formatted, model_template)
-
-        total_new_chars = len(user_content) + len(model_content)
-        if MAX_INPUT_CHARS != float('inf') and total_chars + total_new_chars > MAX_INPUT_CHARS:
-            break
-
-        conversation_parts.append({
-            "role": "user",
-            "parts": [{"text": user_content}]
-        })
-        conversation_parts.append({
-            "role": "model",
-            "parts": [{"text": model_content}]
-        })
-
-        total_chars += total_new_chars
-
-    if len(conversation_parts) < 2:
+    if len(clean_messages) < 2:
         return None, 0
 
-    return {"contents": conversation_parts}, total_chars
+    # The AI/target is the person who spoke last in the conversation
+    last_message = clean_messages[-1]
+    ai_author_id = last_message[2]
+    ai_response = last_message[1]
 
-def process_chain_batch_optimized(chains_batch, target_bot_id, user_template, model_template):
+    # Find the last user message (message before the AI response)
+    user_messages = clean_messages[:-1]  # All messages except the last one
+    if not user_messages:
+        return None, 0
+
+    # The current message is the last user message
+    current_message_data = user_messages[-1]
+    current_message = f"<@{current_message_data[2]}>: {current_message_data[1]}"
+
+    # Build context: all messages before the current message
+    context_messages = []
+    for msg_data in user_messages[:-1]:  # All messages except current and AI response
+        msg_id, content, author_id, timestamp = msg_data
+
+        if str(author_id) == str(ai_author_id):
+            # This is a previous AI message
+            context_messages.append(f"You: {content}")
+        else:
+            # This is a user message
+            context_messages.append(f"<@{author_id}>: {content}")
+
+    # Build the user content
+    if context_messages:
+        context_str = "\n".join(context_messages)
+        user_content = f"CONTEXT:\n{context_str}\n---\nCURRENT: {current_message}"
+    else:
+        user_content = f"CURRENT: {current_message}"
+
+    # Model content is just the AI's response without any prefix
+    model_content = ai_response
+
+    total_chars = len(user_content) + len(model_content)
+
+    record = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": user_content}]
+            },
+            {
+                "role": "model",
+                "parts": [{"text": model_content}]
+            }
+        ]
+    }
+
+    return record, total_chars
+
+def process_chain_batch_single_pairs(chains_batch, target_bot_id=None):
     """
-    Ultra-optimized batch processing with faster text processing and early filtering.
+    Process batch of chains to create single user/model pairs.
+    Target is automatically detected as the last speaker in each conversation.
     """
     batch_records = []
 
@@ -443,21 +455,12 @@ def process_chain_batch_optimized(chains_batch, target_bot_id, user_template, mo
             continue
 
         try:
-            json_record, total_length = create_chain_record_optimized(
-                chain, target_bot_id, user_template, model_template,
-                mention_pattern, role_pattern, channel_pattern, url_pattern
+            json_record, total_length = create_single_pair_record(
+                chain, target_bot_id, mention_pattern, role_pattern, channel_pattern, url_pattern
             )
 
-            if json_record and json_record.get("contents"):
-                contents = json_record["contents"]
-                if len(contents) >= 2:
-                    # Quick meaningful exchange check
-                    last_text = contents[-1]["parts"][0]["text"]
-                    first_text = contents[0]["parts"][0]["text"]
-
-                    # Simple word count check instead of complex regex
-                    if len(last_text.split()) >= 3 and len(first_text.split()) >= 3:
-                        batch_records.append(json_record)
+            if json_record:
+                batch_records.append(json_record)
 
         except Exception:
             # Silent continue for maximum performance
@@ -470,13 +473,12 @@ def write_chain_records_to_jsonl_optimized(
     output_filepath: str,
     description: str,
     target_bot_id: Optional[str] = None,
-    user_template: Optional[str] = None,
-    model_template: Optional[str] = None,
     max_workers: int = 24,
     batch_size: int = 3000,
 ):
     """
     Ultra-optimized version using aggressive parallel processing and memory management.
+    Creates single user/model pairs instead of multi-turn conversations.
     """
     print(f"[*] Processing {len(chains)} chains to {output_filepath} using {max_workers} workers...")
 
@@ -509,7 +511,7 @@ def write_chain_records_to_jsonl_optimized(
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all batches for processing
             future_to_batch = {
-                executor.submit(process_chain_batch_optimized, batch, target_bot_id, user_template, model_template): i
+                executor.submit(process_chain_batch_single_pairs, batch, target_bot_id): i
                 for i, batch in enumerate(chain_batches)
             }
 
@@ -544,20 +546,24 @@ def generate_datasets(
     valid_path: str,
     split_ratio: float,
     target_bot_id: Optional[str] = None,
-    user_template: Optional[str] = None,
-    model_template: Optional[str] = None,
     max_workers: int = 24,
     batch_size: int = 3000,
+    test_mode: Optional[int] = None,
 ):
     """Generate training and validation datasets with ultra-optimized processing."""
     # Get message chains using optimized bulk loading
     all_chains = get_message_chains_from_db(db_dsn)
 
+    # Apply test mode if specified
+    if test_mode:
+        print(f"[TEST MODE] Limiting to {test_mode} chains for testing")
+        all_chains = all_chains[:test_mode]
+
     if len(all_chains) < MIN_PAIRS_FOR_SPLIT:
         print(f"\n[WARNING] Less than {MIN_PAIRS_FOR_SPLIT} chains found.")
         print("[WARNING] All data will be written to the training file only.")
         write_chain_records_to_jsonl_optimized(
-            all_chains, train_path, "Training", target_bot_id, user_template, model_template,
+            all_chains, train_path, "Training", target_bot_id,
             max_workers, batch_size
         )
         open(valid_path, "w").close()
@@ -583,12 +589,12 @@ def generate_datasets(
     # Use optimized parallel processing for both datasets
     print("---")
     write_chain_records_to_jsonl_optimized(
-        training_chains, train_path, "Training set", target_bot_id, user_template, model_template,
+        training_chains, train_path, "Training set", target_bot_id,
         max_workers, batch_size
     )
     print("---")
     write_chain_records_to_jsonl_optimized(
-        validation_chains, valid_path, "Validation set", target_bot_id, user_template, model_template,
+        validation_chains, valid_path, "Validation set", target_bot_id,
         max_workers, batch_size
     )
     print("\n[SUCCESS] Operation completed with ultra-optimized reply chains processing.")
@@ -608,17 +614,7 @@ if __name__ == "__main__":
         "--split-ratio", type=float, default=0.15, help="Validation ratio (default: 0.15)"
     )
     parser.add_argument(
-        "--target-bot-id", type=str, help="Target Discord bot ID (optional)."
-    )
-    parser.add_argument(
-        "--user-template",
-        type=str,
-        help="Custom template for user parts. Use {context_messages} and {current_message} placeholders."
-    )
-    parser.add_argument(
-        "--model-template",
-        type=str,
-        help="Custom template for model parts. Use {response_message} placeholder."
+        "--target-bot-id", type=str, help="Target Discord bot ID (optional - if not provided, last speaker in each conversation is treated as AI)."
     )
     parser.add_argument(
         "--max-workers", type=int, default=DEFAULT_MAX_WORKERS,
@@ -631,6 +627,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--turbo-mode", action="store_true",
         help="Enable maximum performance mode (uses more CPU and memory)"
+    )
+    parser.add_argument(
+        "--test-mode", type=int, metavar="N",
+        help="Test mode: process only N chains for testing (e.g., --test-mode 1000)"
     )
     args = parser.parse_args()
 
@@ -663,17 +663,20 @@ if __name__ == "__main__":
         batch_size = min(TURBO_BATCH_SIZE, batch_size * 2)
         print(f"[🚀] Turbo settings: {max_workers} workers, {batch_size} batch size")
 
-    # Custom templates
-    user_template = args.user_template
-    model_template = args.model_template
+    # Custom templates (not used in new format, but keeping for compatibility)
+    user_template = args.user_template if hasattr(args, 'user_template') else None
+    model_template = args.model_template if hasattr(args, 'model_template') else None
 
-    if user_template:
-        print(f"[INFO] Using custom user template: {user_template[:50]}...")
-    if model_template:
-        print(f"[INFO] Using custom model template: {model_template[:50]}...")
+    if not args.target_bot_id:
+        print("[INFO] No target-bot-id specified. Last speaker in each conversation will be treated as the AI.")
+    else:
+        print(f"[INFO] Target bot ID: {args.target_bot_id}")
 
     print(f"[INFO] Performance settings: {max_workers} workers, {batch_size} batch size")
     print(f"[INFO] Output files will be saved to: {training_file}, {validation_file}")
+
+    if args.test_mode:
+        print(f"[INFO] Test mode enabled: processing only {args.test_mode} chains")
 
     generate_datasets(
         args.db_dsn,
@@ -681,8 +684,7 @@ if __name__ == "__main__":
         validation_file,
         args.split_ratio,
         args.target_bot_id,
-        user_template,
-        model_template,
         max_workers,
         batch_size,
+        args.test_mode,
     )
