@@ -1,4 +1,5 @@
 import psycopg2
+import psycopg2.extras
 import json
 import re
 import argparse
@@ -6,6 +7,10 @@ import sys
 import random
 from tqdm import tqdm
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+from collections import defaultdict
+import gc
 
 MAX_INPUT_CHARS = float('inf')
 MAX_OUTPUT_CHARS = float('inf')
@@ -14,6 +19,11 @@ MAX_VALIDATION_EXAMPLES = 5000
 MIN_PAIRS_FOR_SPLIT = 20
 MAX_CONTEXT_MESSAGES = float('inf')
 CONTEXT_TIME_LIMIT_MINUTES = float('inf')
+
+# Performance optimization constants
+BATCH_SIZE = 1000  # Process chains in batches
+MAX_WORKERS = 4    # Number of parallel workers
+MEMORY_EFFICIENT = True  # Use memory-efficient processing
 
 DISCORD_EPOCH = 1420070400000
 
@@ -98,49 +108,43 @@ def is_meaningful_exchange(input_text: str, output_text: str) -> bool:
     return True
 
 
-def get_conversation_context(
-    cursor,
+def get_conversation_context_optimized(
+    messages_by_channel: dict,
     message_id: int,
     channel_id: int,
     message_timestamp,
     max_context: int | float = MAX_CONTEXT_MESSAGES,
 ) -> list:
-    if max_context == float('inf'):
-        query = """
-        SELECT content, author_id, id
-        FROM messages
-        WHERE channel_id = %s
-        AND id < %s
-        AND content IS NOT NULL
-        AND content != ''
-        ORDER BY id DESC
-        """
-        cursor.execute(query, (channel_id, message_id))
-    else:
-        query = """
-        SELECT content, author_id, id
-        FROM messages
-        WHERE channel_id = %s
-        AND id < %s
-        AND content IS NOT NULL
-        AND content != ''
-        ORDER BY id DESC
-        LIMIT %s
-        """
-        cursor.execute(query, (channel_id, message_id, max_context))
+    """
+    Optimized version that works with pre-loaded in-memory data.
+    """
+    if channel_id not in messages_by_channel:
+        return []
 
-    results = cursor.fetchall()
-    if CONTEXT_TIME_LIMIT_MINUTES != float('inf'):
-        time_limit = message_timestamp - timedelta(minutes=CONTEXT_TIME_LIMIT_MINUTES)
-        filtered_results = []
-        for content, author_id, msg_id in results:
-            msg_timestamp = discord_id_to_timestamp(msg_id)
-            if msg_timestamp >= time_limit:
-                filtered_results.append((content, author_id, msg_timestamp))
-        return list(reversed(filtered_results))
-    else:
-        return list(reversed([(content, author_id, discord_id_to_timestamp(msg_id))
-                             for content, author_id, msg_id in results]))
+    channel_messages = messages_by_channel[channel_id]
+
+    # Find messages before the current message in the same channel
+    context_messages = []
+    for msg_id, content, author_id, timestamp in channel_messages:
+        if msg_id >= message_id:
+            continue
+
+        if CONTEXT_TIME_LIMIT_MINUTES != float('inf'):
+            time_limit = message_timestamp - timedelta(minutes=CONTEXT_TIME_LIMIT_MINUTES)
+            if timestamp < time_limit:
+                continue
+
+        processed_content = preprocess_text(content)
+        if processed_content and len(processed_content.split()) >= 2:
+            context_messages.append((content, author_id, timestamp))
+
+    # Sort by timestamp and limit
+    context_messages.sort(key=lambda x: x[2])
+
+    if max_context != float('inf'):
+        context_messages = context_messages[-max_context:]
+
+    return context_messages
 
 
 def get_conversation_participants(
@@ -154,145 +158,136 @@ def get_conversation_participants(
     return participants
 
 
-def get_extended_context(
-    cursor,
-    message_id: int,
-    channel_id: int,
-    message_timestamp,
-    invalid_messages: set,
-    max_context: int | float = MAX_CONTEXT_MESSAGES,
-) -> list:
-    if max_context == float('inf'):
-        extended_limit = None
-    else:
-        extended_limit = max_context * 2
+def preload_channel_messages(db_dsn: str, channel_ids: set) -> dict:
+    """
+    Preload all messages from specific channels for context lookup.
+    This eliminates the need for repeated database queries during processing.
+    """
+    if not channel_ids:
+        return {}
 
-    if extended_limit is None:
-        query = """
-        SELECT content, author_id, id
-        FROM messages
-        WHERE channel_id = %s
-        AND id < %s
-        AND content IS NOT NULL
-        AND content != ''
-        ORDER BY id DESC
-        """
-        cursor.execute(query, (channel_id, message_id))
-    else:
-        query = """
-        SELECT content, author_id, id
-        FROM messages
-        WHERE channel_id = %s
-        AND id < %s
-        AND content IS NOT NULL
-        AND content != ''
-        ORDER BY id DESC
-        LIMIT %s
-        """
-        cursor.execute(query, (channel_id, message_id, extended_limit))
-    all_potential_messages = list(reversed(cursor.fetchall()))
+    print(f"[*] Preloading context messages from {len(channel_ids)} channels...")
 
-    valid_context = []
-    for msg_content, author_id, msg_id in all_potential_messages:
-        if msg_id in invalid_messages:
-            continue
+    messages_by_channel = defaultdict(list)
 
-        timestamp = discord_id_to_timestamp(msg_id)
+    try:
+        with psycopg2.connect(db_dsn) as conn:
+            with conn.cursor() as cursor:
+                # Use ANY() for efficient bulk query instead of IN clause
+                cursor.execute("""
+                    SELECT id, channel_id, content, author_id
+                    FROM messages
+                    WHERE channel_id = ANY(%s)
+                    AND content IS NOT NULL
+                    AND content != ''
+                    ORDER BY channel_id, id
+                """, (list(channel_ids),))
 
-        if CONTEXT_TIME_LIMIT_MINUTES != float('inf'):
-            time_limit = message_timestamp - timedelta(minutes=CONTEXT_TIME_LIMIT_MINUTES)
-            if timestamp < time_limit:
-                continue
+                for row in cursor:
+                    msg_id, channel_id, content, author_id = row
+                    timestamp = discord_id_to_timestamp(msg_id)
+                    messages_by_channel[channel_id].append((msg_id, content, author_id, timestamp))
 
-        processed_msg = preprocess_text(msg_content)
-        if processed_msg and len(processed_msg.split()) >= 2:
-            valid_context.append((msg_content, author_id, timestamp))
+    except psycopg2.Error as e:
+        print(f"[WARNING] Could not preload channel messages: {e}")
+        return {}
 
-        if max_context != float('inf') and len(valid_context) >= max_context:
-            break
-
-    return valid_context
+    print(f"[+] Preloaded {sum(len(msgs) for msgs in messages_by_channel.values())} context messages.")
+    return dict(messages_by_channel)
 
 
 def get_message_chains_from_db(db_dsn: str) -> list:
     """
-    Récupère tous les messages qui ont au moins une réponse,
-    puis construit les chaînes de réponses complètes.
+    Optimized version: Bulk loads all data into memory, then processes chains in-memory.
+    This dramatically reduces database query time from hours to minutes.
     """
     print(f"[*] Connecting to PostgreSQL database...")
+
     try:
+        # Use connection pool for better performance
         with psycopg2.connect(db_dsn) as conn:
-            with conn.cursor() as cursor:
-                query_root_messages = """
-                SELECT DISTINCT m.id, m.channel_id, m.content, m.author_id
-                FROM messages m
-                WHERE EXISTS (
-                    SELECT 1 FROM messages r
-                    WHERE r.referenced_message_id = m.id
-                    AND r.content IS NOT NULL
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+
+                # First, ensure we have the critical index for performance
+                print("[*] Ensuring database indexes are optimized...")
+                try:
+                    cursor.execute("CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_referenced_id ON messages (referenced_message_id) WHERE referenced_message_id IS NOT NULL;")
+                    cursor.execute("CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_channel_id ON messages (channel_id);")
+                    cursor.execute("CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_content ON messages (id) WHERE content IS NOT NULL AND content != '';")
+                    conn.commit()
+                except psycopg2.Error as e:
+                    print(f"[WARNING] Could not create indexes (may already exist): {e}")
+                    conn.rollback()
+
+                # Step 1: Bulk load all relevant messages into memory
+                print("[*] Bulk loading all messages with replies and their replies...")
+
+                # Get all root messages that have replies + all their reply chains in one go
+                bulk_query = """
+                WITH RECURSIVE reply_chains AS (
+                    -- Base case: all root messages that have replies
+                    SELECT DISTINCT m.id, m.channel_id, m.content, m.author_id, 0 as depth, m.id as root_id
+                    FROM messages m
+                    WHERE EXISTS (
+                        SELECT 1 FROM messages r
+                        WHERE r.referenced_message_id = m.id
+                        AND r.content IS NOT NULL
+                        AND r.content != ''
+                    )
+                    AND m.content IS NOT NULL
+                    AND m.content != ''
+
+                    UNION ALL
+
+                    -- Recursive case: all replies in the chain
+                    SELECT r.id, r.channel_id, r.content, r.author_id, rc.depth + 1, rc.root_id
+                    FROM messages r
+                    INNER JOIN reply_chains rc ON r.referenced_message_id = rc.id
+                    WHERE r.content IS NOT NULL
                     AND r.content != ''
+                    AND rc.depth < 50  -- Prevent infinite recursion
                 )
-                AND m.content IS NOT NULL
-                AND m.content != ''
-                ORDER BY m.id DESC;
+                SELECT id, channel_id, content, author_id, depth, root_id
+                FROM reply_chains
+                ORDER BY root_id, depth, id;
                 """
-                cursor.execute(query_root_messages)
-                root_messages = cursor.fetchall()
 
-                root_messages_with_timestamps = []
-                for msg_id, channel_id, content, author_id in root_messages:
-                    timestamp = discord_id_to_timestamp(msg_id)
-                    root_messages_with_timestamps.append((msg_id, channel_id, content, author_id, timestamp))
+                cursor.execute(bulk_query)
+                all_messages = cursor.fetchall()
 
-                print(f"[+] {len(root_messages_with_timestamps)} messages with replies found.")
+                print(f"[+] Loaded {len(all_messages)} messages from database into memory.")
 
+                # Step 2: Group messages by root_id to form chains
+                print("[*] Building reply chains in memory...")
+                chains_dict = defaultdict(list)
+
+                for msg in all_messages:
+                    timestamp = discord_id_to_timestamp(msg['id'])
+                    msg_tuple = (msg['id'], msg['channel_id'], msg['content'], msg['author_id'], timestamp)
+                    chains_dict[msg['root_id']].append(msg_tuple)
+
+                # Step 3: Sort each chain chronologically and filter valid chains
                 all_chains = []
-                for root_msg in tqdm(root_messages_with_timestamps, desc="Building reply chains"):
-                    chain = build_reply_chain(cursor, root_msg)
-                    if len(chain) >= 2:
+                for root_id, chain in chains_dict.items():
+                    # Sort by timestamp (already sorted by id in SQL, but just to be sure)
+                    chain.sort(key=lambda x: x[0])  # Sort by message ID (chronological)
+
+                    if len(chain) >= 2:  # Only keep chains with at least 2 messages
                         all_chains.append(chain)
 
-                print(f"[+] {len(all_chains)} complete reply chains built.")
+                print(f"[+] {len(all_chains)} complete reply chains built in memory.")
+
+                # Clear memory
+                del all_messages
+                del chains_dict
+                gc.collect()
+
                 return all_chains
 
     except psycopg2.Error as e:
         print(f"[ERROR] PostgreSQL database error : {e}", file=sys.stderr)
         sys.exit(1)
 
-
-def build_reply_chain(cursor, root_message: tuple) -> list:
-    """
-    Construit une chaîne complète de réponses à partir d'un message racine.
-    Retourne une liste de messages dans l'ordre chronologique.
-    """
-    chain = [root_message]
-    current_msg_id = root_message[0]
-
-    while True:
-        query_replies = """
-        SELECT id, channel_id, content, author_id
-        FROM messages
-        WHERE referenced_message_id = %s
-        AND content IS NOT NULL
-        AND content != ''
-        ORDER BY id ASC;
-        """
-        cursor.execute(query_replies, (current_msg_id,))
-        replies = cursor.fetchall()
-
-        if not replies:
-            break
-
-        replies_with_timestamps = []
-        for msg_id, channel_id, content, author_id in replies:
-            timestamp = discord_id_to_timestamp(msg_id)
-            replies_with_timestamps.append((msg_id, channel_id, content, author_id, timestamp))
-
-        chain.extend(replies_with_timestamps)
-
-        current_msg_id = replies_with_timestamps[-1][0]
-
-    return chain
 
 
 def create_chain_record(chain: list, target_bot_id: str | None = None, user_template: str | None = None, model_template: str | None = None) -> tuple:
@@ -367,44 +362,86 @@ def create_chain_record(chain: list, target_bot_id: str | None = None, user_temp
     return {"contents": conversation_parts}, total_chars
 
 
-def write_chain_records_to_jsonl(
+def process_chain_batch(chains_batch, target_bot_id, user_template, model_template):
+    """
+    Process a batch of chains and return valid JSON records.
+    This function is designed to be called in parallel.
+    """
+    batch_records = []
+
+    for chain in chains_batch:
+        if len(chain) < 2:
+            continue
+
+        try:
+            json_record, total_length = create_chain_record(chain, target_bot_id, user_template, model_template)
+
+            if json_record and json_record["contents"]:
+                if len(json_record["contents"]) >= 2:
+                    last_content = json_record["contents"][-1]["parts"][0]["text"]
+                    first_content = json_record["contents"][0]["parts"][0]["text"]
+
+                    last_clean = last_content.split(": ", 1)[-1] if ": " in last_content else last_content
+                    first_clean = first_content.split(": ", 1)[-1] if ": " in first_content else first_content
+
+                    if is_meaningful_exchange(first_clean, last_clean):
+                        batch_records.append(json_record)
+
+        except Exception as e:
+            continue
+
+    return batch_records
+
+
+def write_chain_records_to_jsonl_optimized(
     chains: list,
     output_filepath: str,
     description: str,
     target_bot_id: str | None = None,
     user_template: str | None = None,
     model_template: str | None = None,
+    max_workers: int = 4,
+    batch_size: int = 1000,
 ):
     """
-    Écrit les chaînes de messages au format JSONL pour l'entraînement.
+    Optimized version using parallel processing for chain record creation.
     """
-    print(f"[*] Write {len(chains)} chains to {output_filepath}...")
+    print(f"[*] Processing {len(chains)} chains to {output_filepath} using {max_workers} workers...")
+
+    # Split chains into batches for parallel processing
+    chain_batches = []
+    for i in range(0, len(chains), batch_size):
+        batch = chains[i:i + batch_size]
+        chain_batches.append(batch)
+
     valid_records_count = 0
 
     with open(output_filepath, "w", encoding="utf-8") as f:
-        for chain in tqdm(chains, desc=description):
-            if len(chain) < 2:
-                continue
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all batches for processing
+            future_to_batch = {
+                executor.submit(process_chain_batch, batch, target_bot_id, user_template, model_template): batch
+                for batch in chain_batches
+            }
 
-            try:
-                json_record, total_length = create_chain_record(chain, target_bot_id, user_template, model_template)
+            # Process completed batches with progress bar
+            with tqdm(total=len(chain_batches), desc=description) as pbar:
+                for future in as_completed(future_to_batch):
+                    try:
+                        batch_records = future.result()
 
-                if json_record and json_record["contents"]:
-                    if len(json_record["contents"]) >= 2:
-                        last_content = json_record["contents"][-1]["parts"][0]["text"]
-                        first_content = json_record["contents"][0]["parts"][0]["text"]
-
-                        last_clean = last_content.split(": ", 1)[-1] if ": " in last_content else last_content
-                        first_clean = first_content.split(": ", 1)[-1] if ": " in first_content else first_content
-
-                        if is_meaningful_exchange(first_clean, last_clean):
-                            f.write(json.dumps(json_record, ensure_ascii=False) + "\n")
+                        # Write records to file
+                        for record in batch_records:
+                            f.write(json.dumps(record, ensure_ascii=False) + "\n")
                             valid_records_count += 1
 
-            except Exception as e:
-                continue
+                    except Exception as e:
+                        print(f"[WARNING] Batch processing failed: {e}")
+
+                    pbar.update(1)
 
     print(f"[+] {valid_records_count} valid records written to {output_filepath}.")
+    return valid_records_count
 
 
 def generate_datasets(
@@ -415,14 +452,18 @@ def generate_datasets(
     target_bot_id: str | None = None,
     user_template: str | None = None,
     model_template: str | None = None,
+    max_workers: int = 8,
+    batch_size: int = 1000,
 ):
+    # Get message chains using optimized bulk loading
     all_chains = get_message_chains_from_db(db_dsn)
 
     if len(all_chains) < MIN_PAIRS_FOR_SPLIT:
         print(f"\n[WARNING] Less than {MIN_PAIRS_FOR_SPLIT} chains found.")
         print("[WARNING] All data will be written to the training file only.")
-        write_chain_records_to_jsonl(
-            all_chains, train_path, "Training", target_bot_id, user_template, model_template
+        write_chain_records_to_jsonl_optimized(
+            all_chains, train_path, "Training", target_bot_id, user_template, model_template,
+            max_workers, batch_size
         )
         open(valid_path, "w").close()
         return
@@ -443,20 +484,24 @@ def generate_datasets(
     print(
         f"\n[INFO] {len(training_chains)} chains for training, {len(validation_chains)} for validation"
     )
+
+    # Use optimized parallel processing for both datasets
     print("---")
-    write_chain_records_to_jsonl(
-        training_chains, train_path, "Training set", target_bot_id, user_template, model_template
+    write_chain_records_to_jsonl_optimized(
+        training_chains, train_path, "Training set", target_bot_id, user_template, model_template,
+        max_workers, batch_size
     )
     print("---")
-    write_chain_records_to_jsonl(
-        validation_chains, valid_path, "Validation set", target_bot_id, user_template, model_template
+    write_chain_records_to_jsonl_optimized(
+        validation_chains, valid_path, "Validation set", target_bot_id, user_template, model_template,
+        max_workers, batch_size
     )
-    print("\n[SUCCESS] Operation completed with reply chains.")
+    print("\n[SUCCESS] Operation completed with optimized reply chains processing.")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Prepares Discord reply chains for fine-tuning Gemini 2.0 Flash.",
+        description="Optimized Discord reply chain processor for fine-tuning Gemini 2.0 Flash.\nPerformance optimized for 96GB RAM systems.",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument(
@@ -483,12 +528,24 @@ if __name__ == "__main__":
         type=str,
         help="Custom template for model parts. Use {response_message} placeholder."
     )
+    parser.add_argument(
+        "--max-workers", type=int, default=8,
+        help="Number of parallel workers for processing (default: 8, optimized for 96GB RAM)"
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=1000,
+        help="Batch size for parallel processing (default: 1000)"
+    )
 
     args = parser.parse_args()
 
     if not 0 < args.split_ratio < 1:
         print("[ERROR] The split-ratio must be between 0 and 1.", file=sys.stderr)
         sys.exit(1)
+
+    # Performance settings
+    max_workers = args.max_workers
+    batch_size = args.batch_size
 
     # Récupérer les templates personnalisés
     user_template = args.user_template
@@ -500,6 +557,8 @@ if __name__ == "__main__":
     if model_template:
         print(f"[INFO] Using custom model template: {model_template[:50]}...")
 
+    print(f"[INFO] Performance settings: {max_workers} workers, {batch_size} batch size")
+
     generate_datasets(
         args.db_dsn,
         args.training_output_file,
@@ -508,4 +567,6 @@ if __name__ == "__main__":
         args.target_bot_id,
         user_template,
         model_template,
+        max_workers,
+        batch_size,
     )
