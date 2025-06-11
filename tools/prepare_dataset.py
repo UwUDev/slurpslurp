@@ -23,18 +23,7 @@ CONTEXT_TIME_LIMIT_MINUTES = float('inf')
 # Performance optimization constants
 BATCH_SIZE = 2000  # Increased batch size for better throughput
 MAX_WORKERS = 16   # Utilize more cores on 96GB system
-MEMORY_EFFICIENT = True    parser.add_argument(
-        "--max-workers", type=int, default=16,
-        help="Number of parallel workers for processing (default: 16, optimized for 96GB RAM)"
-    )
-    parser.add_argument(
-        "--batch-size", type=int, default=2000,
-        help="Batch size for parallel processing (default: 2000, optimized for throughput)"
-    )
-    parser.add_argument(
-        "--turbo-mode", action="store_true",
-        help="Enable maximum performance mode (uses more CPU and memory)"
-    )memory-efficient processing
+MEMORY_EFFICIENT = True # memory-efficient processing
 CHUNK_SIZE = 10000  # Process data in larger chunks
 
 DISCORD_EPOCH = 1420070400000
@@ -716,7 +705,10 @@ if __name__ == "__main__":
         "--batch-size", type=int, default=1000,
         help="Batch size for parallel processing (default: 1000)"
     )
-
+    parser.add_argument(
+        "--turbo-mode", action="store_true",
+        help="Enable maximum performance mode (uses more CPU and memory)"
+    )
     args = parser.parse_args()
 
     if not 0 < args.split_ratio < 1:
