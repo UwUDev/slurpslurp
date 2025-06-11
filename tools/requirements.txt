@@ -2,3 +2,7 @@ fastapi
 uvicorn
 websockets
 watchdog
+# Dependencies for optimized prepare_dataset.py
+psycopg2-binary
+tqdm
+psutil
