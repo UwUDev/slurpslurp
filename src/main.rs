@@ -188,6 +188,21 @@ async fn handle_account(
                         error!("Account {} : Error deleting channel: {}", account_index, e);
                     }
                 }
+                Ok(Event::GuildRoleCreate(role_create)) => {
+                    if let Err(e) = process_role_create(&role_create, &db_client).await {
+                        error!("Account {} : Error creating role: {}", account_index, e);
+                    }
+                }
+                Ok(Event::GuildRoleUpdate(role_update)) => {
+                    if let Err(e) = process_role_update(&role_update, &db_client).await {
+                        error!("Account {} : Error updating role: {}", account_index, e);
+                    }
+                }
+                Ok(Event::GuildRoleDelete(role_delete)) => {
+                    if let Err(e) = process_role_delete(&role_delete, &db_client).await {
+                        error!("Account {} : Error deleting role: {}", account_index, e);
+                    }
+                }
                 Err(e) => {
                     error!("Event error account {}: {}", account_index, e);
                     // if client error (Connect) break the loop to reconnect

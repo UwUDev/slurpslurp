@@ -5,6 +5,7 @@ use discord_client_structs::structs::guild::GatewayGuild;
 use discord_client_structs::structs::user::{Member, User};
 use log::{debug, error};
 use std::sync::Arc;
+use discord_client_gateway::events::structs::guild::role::GuildRoleCreateEvent;
 use tokio::sync::Mutex;
 use tokio_postgres::Client;
 
@@ -172,5 +173,66 @@ pub async fn process_channel_delete(
             debug!("Channel {} deleted successfully", channel_delete.channel.id);
         }
     }
+    Ok(())
+}
+
+pub async fn process_role_create(
+    role_create: &GuildRoleCreateEvent,
+    db_client: &Option<Arc<Mutex<Client>>>,
+) -> BoxedResult<()> {
+    if let Some(db_client) = db_client {
+        let db_client = db_client.lock().await;
+        if let Err(e) = bulk_upsert_roles(&[role_create.role.clone()], role_create.guild_id, &db_client)
+            .await
+        {
+            error!(
+                "Failed to save role {} in guild {}: {}",
+                role_create.role.id, role_create.guild_id, e
+            );
+        } else {
+            debug!("Role {} created and saved in guild {}", role_create.role.id, role_create.guild_id);
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn process_role_update(
+    role_update: &discord_client_gateway::events::structs::guild::role::GuildRoleUpdateEvent,
+    db_client: &Option<Arc<Mutex<Client>>>,
+) -> BoxedResult<()> {
+    if let Some(db_client) = db_client {
+        let db_client = db_client.lock().await;
+        if let Err(e) = bulk_upsert_roles(&[role_update.role.clone()], role_update.guild_id, &db_client)
+            .await
+        {
+            error!(
+                "Failed to update role {} in guild {}: {}",
+                role_update.role.id, role_update.guild_id, e
+            );
+        } else {
+            debug!("Role {} updated successfully in guild {}", role_update.role.id, role_update.guild_id);
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn process_role_delete(
+    role_delete: &discord_client_gateway::events::structs::guild::role::GuildRoleDeleteEvent,
+    db_client: &Option<Arc<Mutex<Client>>>,
+) -> BoxedResult<()> {
+    if let Some(db_client) = db_client {
+        let db_client = db_client.lock().await;
+        if let Err(e) = delete_role(role_delete.role_id, &db_client).await {
+            error!(
+                "Failed to delete role {} in guild {}: {}",
+                role_delete.role_id, role_delete.guild_id, e
+            );
+        } else {
+            debug!("Role {} deleted successfully in guild {}", role_delete.role_id, role_delete.guild_id);
+        }
+    }
+
     Ok(())
 }

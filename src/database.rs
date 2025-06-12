@@ -468,3 +468,16 @@ pub async fn delete_channel(
 
     Ok(())
 }
+
+pub async fn delete_role(
+    role_id: u64,
+    db: &Client,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let sql_role_id: i64 = role_id as i64;
+    db.execute(
+        "DELETE FROM roles WHERE id = $1",
+        &[&sql_role_id],
+    ).await?;
+
+    Ok(())
+}
