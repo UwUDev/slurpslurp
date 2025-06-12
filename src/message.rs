@@ -1,8 +1,8 @@
 use crate::config::Config;
-use crate::database::{delete_message, upsert_message, upsert_user};
+use crate::database::{bulk_delete_messages, delete_message, upsert_message, upsert_user};
 use crate::downloader;
 use discord_client_gateway::events::structs::message::{
-    MessageCreateEvent, MessageDeleteEvent, MessageUpdateEvent,
+    MessageCreateEvent, MessageDeleteBulkEvent, MessageDeleteEvent, MessageUpdateEvent,
 };
 use discord_client_structs::structs::message::Message;
 use discord_client_structs::structs::user::User;
@@ -106,6 +106,22 @@ pub async fn process_message_delete(
 
         if let Err(e) = delete_message(msg_id, &db_client).await {
             error!("Failed to delete message: {}", e);
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn process_message_delete_bulk(
+    msg_delete_bulk: &MessageDeleteBulkEvent,
+    db_client: &Option<Arc<Mutex<Client>>>,
+) -> Result<(), Box<dyn Error>> {
+    if let Some(db_client) = db_client {
+        let db_client = db_client.lock().await;
+
+        let ids = &msg_delete_bulk.ids;
+        if let Err(e) = bulk_delete_messages(ids, &db_client).await {
+            error!("Failed to bulk delete messages: {}", e);
         }
     }
 

@@ -131,6 +131,23 @@ pub async fn delete_message(msg_id: &u64, db: &Client) -> Result<(), Box<dyn Err
     Ok(())
 }
 
+pub async fn bulk_delete_messages(msg_ids: &[u64], db: &Client) -> Result<(), Box<dyn Error>> {
+    if msg_ids.is_empty() {
+        return Ok(());
+    }
+
+    let mut sql_ids: Vec<i64> = msg_ids.iter().map(|&id| id as i64).collect();
+    sql_ids.sort_unstable();
+
+    db.execute(
+        "UPDATE messages SET deleted_at = NOW() WHERE id = ANY($1) AND deleted_at IS NULL",
+        &[&sql_ids],
+    )
+    .await?;
+
+    Ok(())
+}
+
 pub async fn upsert_user(
     user: &User,
     db: &Client,

@@ -164,6 +164,15 @@ async fn handle_account(
                         error!("Account {} : Error deleting message: {}", account_index, e);
                     }
                 }
+                Ok(Event::MessageDeleteBulk(msg_delete_bulk)) => {
+                    if let Err(e) = process_message_delete_bulk(&msg_delete_bulk, &db_client).await
+                    {
+                        error!(
+                            "Account {} : Error deleting bulk messages: {}",
+                            account_index, e
+                        );
+                    }
+                }
                 Err(e) => {
                     error!("Event error account {}: {}", account_index, e);
                     // if client error (Connect) break the loop to reconnect
