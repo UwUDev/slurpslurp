@@ -4,3 +4,4 @@
 /.venv/
 /tests
 /config.toml
+/tools/invites.txt
