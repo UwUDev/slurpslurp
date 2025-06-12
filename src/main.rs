@@ -6,7 +6,7 @@ mod message;
 
 use crate::config::Config;
 use crate::database::connect_db;
-use crate::guild::process_ready_guilds;
+use crate::guild::*;
 use crate::message::*;
 use discord_client_gateway::events::Event;
 use discord_client_gateway::gateway::GatewayClient;
@@ -171,6 +171,21 @@ async fn handle_account(
                             "Account {} : Error deleting bulk messages: {}",
                             account_index, e
                         );
+                    }
+                }
+                Ok(Event::ChannelCreate(channel_create)) => {
+                    if let Err(e) = process_channel_create(&channel_create, &db_client).await {
+                        error!("Account {} : Error creating channel: {}", account_index, e);
+                    }
+                }
+                Ok(Event::ChannelUpdate(channel_update)) => {
+                    if let Err(e) = process_channel_update(&channel_update, &db_client).await {
+                        error!("Account {} : Error updating channel: {}", account_index, e);
+                    }
+                }
+                Ok(Event::ChannelDelete(channel_delete)) => {
+                    if let Err(e) = process_channel_delete(&channel_delete, &db_client).await {
+                        error!("Account {} : Error deleting channel: {}", account_index, e);
                     }
                 }
                 Err(e) => {

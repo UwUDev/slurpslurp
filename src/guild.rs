@@ -1,14 +1,18 @@
 use crate::BoxedResult;
 use crate::database::*;
+use discord_client_gateway::events::structs::channel::ChannelCreateEvent;
 use discord_client_structs::structs::guild::GatewayGuild;
 use discord_client_structs::structs::user::{Member, User};
 use log::{debug, error};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tokio_postgres::Client;
 
 pub async fn process_ready_guilds(
     guilds: &Vec<GatewayGuild>,
     ready_members: &Option<Vec<Vec<Member>>>,
     ready_users: &Option<Vec<User>>,
-    db: &tokio_postgres::Client,
+    db: &Client,
 ) -> BoxedResult<()> {
     if let Some(members_by_guild) = ready_members {
         for (guild_index, members) in members_by_guild.iter().enumerate() {
@@ -108,5 +112,65 @@ pub async fn process_ready_guilds(
         }
     }
 
+    Ok(())
+}
+
+pub async fn process_channel_create(
+    channel_create: &ChannelCreateEvent,
+    db_client: &Option<Arc<Mutex<Client>>>,
+) -> BoxedResult<()> {
+    if let Some(db_client) = db_client {
+        let db_client = db_client.lock().await;
+        if let Err(e) =
+            bulk_upsert_channels(&[channel_create.channel.clone()], None, &db_client).await
+        {
+            error!(
+                "Failed to save channel {}: {}",
+                channel_create.channel.id, e
+            );
+        } else {
+            debug!("Channel {} created and saved", channel_create.channel.id);
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn process_channel_update(
+    channel_update: &discord_client_gateway::events::structs::channel::ChannelUpdateEvent,
+    db_client: &Option<Arc<Mutex<Client>>>,
+) -> BoxedResult<()> {
+    if let Some(db_client) = db_client {
+        let db_client = db_client.lock().await;
+        if let Err(e) =
+            bulk_upsert_channels(&[channel_update.channel.clone()], None, &db_client).await
+        {
+            error!(
+                "Failed to update channel {}: {}",
+                channel_update.channel.id, e
+            );
+        } else {
+            debug!("Channel {} updated successfully", channel_update.channel.id);
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn process_channel_delete(
+    channel_delete: &discord_client_gateway::events::structs::channel::ChannelDeleteEvent,
+    db_client: &Option<Arc<Mutex<Client>>>,
+) -> BoxedResult<()> {
+    if let Some(db_client) = db_client {
+        let db_client = db_client.lock().await;
+        if let Err(e) = delete_channel(channel_delete.channel.id, &db_client).await {
+            error!(
+                "Failed to delete channel {}: {}",
+                channel_delete.channel.id, e
+            );
+        } else {
+            debug!("Channel {} deleted successfully", channel_delete.channel.id);
+        }
+    }
     Ok(())
 }

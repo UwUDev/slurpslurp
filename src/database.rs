@@ -457,3 +457,14 @@ pub async fn delete_guild_roles(
 
     Ok(())
 }
+
+pub async fn delete_channel(
+    channel_id: u64,
+    db: &Client,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let sql_channel_id: i64 = channel_id as i64;
+    db.execute("DELETE FROM channels WHERE id = $1", &[&sql_channel_id])
+        .await?;
+
+    Ok(())
+}
