@@ -1,11 +1,11 @@
 use crate::BoxedResult;
 use crate::database::*;
 use discord_client_gateway::events::structs::channel::ChannelCreateEvent;
+use discord_client_gateway::events::structs::guild::role::GuildRoleCreateEvent;
 use discord_client_structs::structs::guild::GatewayGuild;
 use discord_client_structs::structs::user::{Member, User};
 use log::{debug, error};
 use std::sync::Arc;
-use discord_client_gateway::events::structs::guild::role::GuildRoleCreateEvent;
 use tokio::sync::Mutex;
 use tokio_postgres::Client;
 
@@ -27,11 +27,6 @@ pub async fn process_ready_guilds(
             }
 
             let guild_id = guilds[guild_index].id;
-            debug!(
-                "Processing {} members for guild {}",
-                members.len(),
-                guild_id
-            );
 
             for member in members {
                 if let Some(user) = &member.user {
@@ -182,15 +177,22 @@ pub async fn process_role_create(
 ) -> BoxedResult<()> {
     if let Some(db_client) = db_client {
         let db_client = db_client.lock().await;
-        if let Err(e) = bulk_upsert_roles(&[role_create.role.clone()], role_create.guild_id, &db_client)
-            .await
+        if let Err(e) = bulk_upsert_roles(
+            &[role_create.role.clone()],
+            role_create.guild_id,
+            &db_client,
+        )
+        .await
         {
             error!(
                 "Failed to save role {} in guild {}: {}",
                 role_create.role.id, role_create.guild_id, e
             );
         } else {
-            debug!("Role {} created and saved in guild {}", role_create.role.id, role_create.guild_id);
+            debug!(
+                "Role {} created and saved in guild {}",
+                role_create.role.id, role_create.guild_id
+            );
         }
     }
 
@@ -203,15 +205,22 @@ pub async fn process_role_update(
 ) -> BoxedResult<()> {
     if let Some(db_client) = db_client {
         let db_client = db_client.lock().await;
-        if let Err(e) = bulk_upsert_roles(&[role_update.role.clone()], role_update.guild_id, &db_client)
-            .await
+        if let Err(e) = bulk_upsert_roles(
+            &[role_update.role.clone()],
+            role_update.guild_id,
+            &db_client,
+        )
+        .await
         {
             error!(
                 "Failed to update role {} in guild {}: {}",
                 role_update.role.id, role_update.guild_id, e
             );
         } else {
-            debug!("Role {} updated successfully in guild {}", role_update.role.id, role_update.guild_id);
+            debug!(
+                "Role {} updated successfully in guild {}",
+                role_update.role.id, role_update.guild_id
+            );
         }
     }
 
@@ -230,7 +239,10 @@ pub async fn process_role_delete(
                 role_delete.role_id, role_delete.guild_id, e
             );
         } else {
-            debug!("Role {} deleted successfully in guild {}", role_delete.role_id, role_delete.guild_id);
+            debug!(
+                "Role {} deleted successfully in guild {}",
+                role_delete.role_id, role_delete.guild_id
+            );
         }
     }
 

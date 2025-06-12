@@ -5,12 +5,14 @@ mod guild;
 mod message;
 
 use crate::config::Config;
-use crate::database::connect_db;
+use crate::database::{bulk_upsert_users, connect_db};
 use crate::guild::*;
 use crate::message::*;
 use discord_client_gateway::events::Event;
+use discord_client_gateway::events::structs::ready::ReadySupplementalEvent;
 use discord_client_gateway::gateway::GatewayClient;
 use discord_client_rest::rest::RestClient;
+use discord_client_structs::structs::user::User;
 use log::{debug, error, info, warn};
 use std::error::Error;
 use std::sync::Arc;
@@ -146,6 +148,12 @@ async fn handle_account(
                     gateway_client.bulk_guild_subscribe(ids).await?;
                     debug!("Account {} : Subscribed to {} guilds", account_index, count);
                 }
+                Ok(Event::ReadySupplemental(ready_supplemental)) => {
+                    if let Some(ref db) = db_client {
+                        let client = db.lock().await;
+                        process_ready_supplemental(&ready_supplemental, &client).await?;
+                    }
+                }
                 Ok(Event::MessageCreate(msg_create)) => {
                     if let Err(e) = process_message_create(&msg_create, &db_client).await {
                         warn!(
@@ -216,4 +224,31 @@ async fn handle_account(
             }
         }
     }
+}
+
+async fn process_ready_supplemental(
+    ready_supplemental: &ReadySupplementalEvent,
+    client: &Client,
+) -> BoxedResult<()> {
+    let users: Vec<User> = {
+        let lazy_users: Vec<User> = ready_supplemental
+            .lazy_private_channels
+            .iter()
+            .filter_map(|channel| channel.recipients.clone())
+            .flatten()
+            .collect();
+        
+        let mut users: Vec<User> = ready_supplemental
+            .clone()
+            .merged_members
+            .into_iter()
+            .flatten()
+            .filter_map(|member| member.user)
+            .collect();
+
+        users.extend(lazy_users);
+        users
+    };
+
+    bulk_upsert_users(users.as_slice(), client).await
 }

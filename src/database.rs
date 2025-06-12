@@ -5,6 +5,7 @@ use discord_client_structs::structs::guild::GatewayGuild;
 use discord_client_structs::structs::guild::role::Role;
 use discord_client_structs::structs::message::{Message, MessageType};
 use discord_client_structs::structs::user::User;
+use log::debug;
 use serde_json;
 use std::error::Error;
 use tokio_postgres::types::ToSql;
@@ -192,6 +193,81 @@ pub async fn upsert_user(
         ],
     )
     .await?;
+
+    Ok(())
+}
+
+pub async fn bulk_upsert_users(
+    users: &[User],
+    db: &Client,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    if users.is_empty() {
+        return Ok(());
+    }
+
+    let mut user_data = Vec::new();
+
+    for user in users {
+        user_data.push((
+            user.id as i64,
+            user.username.clone(),
+            user.global_name.clone(),
+            user.avatar.clone(),
+            user.bot.unwrap_or(false),
+            user.banner.clone(),
+            user.accent_color.map(|v| v as i32),
+            user.flags.map(|v| v as i32),
+            user.premium_type.map(|v| v as i32),
+            user.public_flags.map(|v| v as i32),
+        ));
+    }
+
+    let mut placeholders = Vec::new();
+    let mut values: Vec<&(dyn ToSql + Sync)> = Vec::new();
+    let mut param_index = 1;
+
+    for data in &user_data {
+        placeholders.push(format!(
+            "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
+            param_index,
+            param_index + 1,
+            param_index + 2,
+            param_index + 3,
+            param_index + 4,
+            param_index + 5,
+            param_index + 6,
+            param_index + 7,
+            param_index + 8,
+            param_index + 9
+        ));
+
+        values.extend_from_slice(&[
+            &data.0, &data.1, &data.2, &data.3, &data.4, &data.5, &data.6, &data.7, &data.8,
+            &data.9,
+        ]);
+
+        param_index += 10;
+    }
+
+    let query = format!(
+        r#"INSERT INTO users (id, username, global_name, avatar, bot, banner, accent_color, flags, premium_type, public_flags)
+        VALUES {}
+        ON CONFLICT (id) DO UPDATE SET
+            username = EXCLUDED.username,
+            global_name = EXCLUDED.global_name,
+            avatar = EXCLUDED.avatar,
+            bot = EXCLUDED.bot,
+            banner = EXCLUDED.banner,
+            accent_color = EXCLUDED.accent_color,
+            flags = EXCLUDED.flags,
+            premium_type = EXCLUDED.premium_type,
+            public_flags = EXCLUDED.public_flags"#,
+        placeholders.join(", ")
+    );
+
+    db.execute(&query, &values).await?;
+
+    debug!("Bulk upserted {} users", users.len());
 
     Ok(())
 }
@@ -469,15 +545,10 @@ pub async fn delete_channel(
     Ok(())
 }
 
-pub async fn delete_role(
-    role_id: u64,
-    db: &Client,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
+pub async fn delete_role(role_id: u64, db: &Client) -> Result<(), Box<dyn Error + Send + Sync>> {
     let sql_role_id: i64 = role_id as i64;
-    db.execute(
-        "DELETE FROM roles WHERE id = $1",
-        &[&sql_role_id],
-    ).await?;
+    db.execute("DELETE FROM roles WHERE id = $1", &[&sql_role_id])
+        .await?;
 
     Ok(())
 }
