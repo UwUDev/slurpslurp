@@ -1,11 +1,11 @@
 # SlurpSlurp
 
 SlurpSlurp is a discord data harvester. 
-It uses discord tokens to suck up all data passing through discord accounts (messages, users, files, images, embeds, ...).
+It uses discord tokens to suck up all data passing through discord accounts (messages, users, files, images, embeds, guilds, channels, roles...).
 
 This project lets you “back-up” your account from the moment you start, or collect massive amounts of data. You can then make extremely fast and accurate local searches everywhere at once.
 
-Other tools are available in the [tools](./tools) folder, such as a live image viewer and a data preparer for fine-tuning LLMs.
+Other tools are available in the [tools](./tools) folder, such as a live image viewer, invites extractor and a data preparer for fine-tuning LLMs.
 
 - [SlurpSlurp](#slurpslurp)
 - [Running](#running)
@@ -81,37 +81,24 @@ python prepare_dataset.py "postgresql://postgres:postgres@localhost:5432/slurpsl
 - `validation_data.jsonl`: The output file for the validation data.
 - `--split-ratio 0.1`: The ratio of the dataset to be used for validation (default is 0.1, meaning 10% of the data will be used for validation).
 
+## Invites extractor
+
+The invites extractor tool allows you to extract invites from the collected data. You can run it using the following command:
+
+```bash
+cd tools
+python invites_extractor.py "postgresql://postgres:postgres@localhost:5432/slurpslurp"
+```
+
+This will output a txt file containing all the unique invites codes found in the collected data.
+
 # Database
 
 SlurpSlurp uses PostgreSQL as its database to store the collected data. You can set up your PostgreSQL database [here](https://www.postgresql.org/docs/current/tutorial-install.html).
 
 ## Current Schema
 
-```sql
-create table messages
-(
-    id                    bigint                   not null
-        primary key,
-    channel_id            bigint                   not null,
-    author_id             bigint                   not null,
-    guild_id              bigint,
-    content               text,
-    created_at            timestamp with time zone not null,
-    edited_at             timestamp with time zone,
-    message_type          integer                  not null,
-    flags                 bigint default 0         not null,
-    referenced_message_id bigint
-        references messages,
-    attachments           jsonb  default '[]'::jsonb not null,
-    deleted_at            timestamp with time zone
-);
-
-create index idx_messages_channel
-    on messages (channel_id);
-
-create index idx_messages_guild
-    on messages (guild_id);
-```
+See [setup.sql](./sql_scripts/setup.sql).
 
 ### DB Optimizations
 
