@@ -1,10 +1,12 @@
 mod config;
 mod database;
 mod downloader;
+mod guild;
 mod message;
 
 use crate::config::Config;
 use crate::database::connect_db;
+use crate::guild::process_ready_guilds;
 use crate::message::*;
 use discord_client_gateway::events::Event;
 use discord_client_gateway::gateway::GatewayClient;
@@ -128,6 +130,13 @@ async fn handle_account(
                 Ok(Event::Ready(ready)) => {
                     let mut ids: Vec<u64> = Vec::new();
                     let guilds = ready.guilds;
+
+                    if let Some(ref db) = db_client {
+                        let client = db.lock().await;
+                        process_ready_guilds(&guilds, &ready.merged_members, &ready.users, &client)
+                            .await?;
+                    }
+
                     for guild in guilds {
                         let guild_id = guild.id;
                         ids.push(guild_id);

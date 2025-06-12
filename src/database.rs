@@ -1,8 +1,13 @@
 use crate::BoxedResult;
 use crate::config::Config;
+use discord_client_structs::structs::channel::Channel;
+use discord_client_structs::structs::guild::GatewayGuild;
+use discord_client_structs::structs::guild::role::Role;
 use discord_client_structs::structs::message::{Message, MessageType};
 use discord_client_structs::structs::user::User;
+use serde_json;
 use std::error::Error;
+use tokio_postgres::types::ToSql;
 use tokio_postgres::{Client, NoTls};
 
 pub async fn connect_db() -> BoxedResult<Client> {
@@ -170,6 +175,268 @@ pub async fn upsert_user(
         ],
     )
     .await?;
+
+    Ok(())
+}
+
+pub async fn upsert_guild(
+    guild: &GatewayGuild,
+    db: &Client,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let guild_id = guild.id as i64;
+
+    if let Some(props) = &guild.properties {
+        let name = &props.name;
+        let icon = &props.icon;
+        let region = &props.region;
+        let owner_id = props.owner_id as i64;
+        let member_count = guild.member_count.map(|count| count as i32);
+        let features = props.features.clone();
+        let premium_tier = Some(props.premium_tier as i32);
+
+        db.execute(
+            "INSERT INTO guilds (
+                id, name, icon, region, owner_id, member_count, features, premium_tier
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8
+            )
+            ON CONFLICT (id) DO UPDATE SET
+                name = EXCLUDED.name,
+                icon = EXCLUDED.icon,
+                region = EXCLUDED.region,
+                owner_id = EXCLUDED.owner_id,
+                member_count = EXCLUDED.member_count,
+                features = EXCLUDED.features,
+                premium_tier = EXCLUDED.premium_tier",
+            &[
+                &guild_id,
+                &name,
+                &icon,
+                &region,
+                &owner_id,
+                &member_count,
+                &features,
+                &premium_tier,
+            ],
+        )
+        .await?;
+    } else {
+        // Fallback to using the GatewayGuild fields
+        let name = &guild.name;
+        let icon = &guild.icon;
+        let region = &guild.region;
+        let owner_id = 0i64;
+        let member_count = guild.member_count.map(|count| count as i32);
+        let features: Option<Vec<String>> = guild.features.clone();
+        let premium_tier: Option<i32> = None;
+
+        db.execute(
+            "INSERT INTO guilds (
+                id, name, icon, region, owner_id, member_count, features, premium_tier
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8
+            )
+            ON CONFLICT (id) DO UPDATE SET
+                name = EXCLUDED.name,
+                icon = EXCLUDED.icon,
+                region = EXCLUDED.region,
+                member_count = EXCLUDED.member_count,
+                features = EXCLUDED.features,
+                premium_tier = EXCLUDED.premium_tier",
+            &[
+                &guild_id,
+                &name,
+                &icon,
+                &region,
+                &owner_id,
+                &member_count,
+                &features,
+                &premium_tier,
+            ],
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+pub async fn bulk_upsert_roles(
+    roles: &[Role],
+    guild_id: u64,
+    db: &Client,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    if roles.is_empty() {
+        return Ok(());
+    }
+
+    let guild_id_i64 = guild_id as i64;
+    let mut role_data = Vec::new();
+
+    for role in roles {
+        role_data.push((
+            role.id as i64,
+            guild_id_i64,
+            role.name.clone(),
+            role.color as i32,
+            role.hoist,
+            role.position,
+            role.permissions.clone(),
+            role.flags.map(|f| f as i64),
+            role.icon.clone(),
+            role.unicode_emoji.clone(),
+            role.description.clone(),
+        ));
+    }
+
+    let mut placeholders = Vec::new();
+    let mut values: Vec<&(dyn ToSql + Sync)> = Vec::new();
+    let mut param_index = 1;
+
+    for data in &role_data {
+        placeholders.push(format!(
+            "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
+            param_index,
+            param_index + 1,
+            param_index + 2,
+            param_index + 3,
+            param_index + 4,
+            param_index + 5,
+            param_index + 6,
+            param_index + 7,
+            param_index + 8,
+            param_index + 9,
+            param_index + 10
+        ));
+
+        values.extend_from_slice(&[
+            &data.0, &data.1, &data.2, &data.3, &data.4, &data.5, &data.6, &data.7, &data.8,
+            &data.9, &data.10,
+        ]);
+
+        param_index += 11;
+    }
+
+    let query = format!(
+        "INSERT INTO roles (
+            id, guild_id, name, color, hoist, position, permissions,
+            flags, icon, unicode_emoji, description
+        ) VALUES {}
+        ON CONFLICT (id, guild_id) DO UPDATE SET
+            name = EXCLUDED.name,
+            color = EXCLUDED.color,
+            hoist = EXCLUDED.hoist,
+            position = EXCLUDED.position,
+            permissions = EXCLUDED.permissions,
+            flags = EXCLUDED.flags,
+            icon = EXCLUDED.icon,
+            unicode_emoji = EXCLUDED.unicode_emoji,
+            description = EXCLUDED.description",
+        placeholders.join(", ")
+    );
+
+    db.execute(&query, &values).await?;
+    Ok(())
+}
+
+pub async fn bulk_upsert_channels(
+    channels: &[Channel],
+    guild_id: Option<u64>,
+    db: &Client,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    if channels.is_empty() {
+        return Ok(());
+    }
+
+    let mut channel_data = Vec::new();
+
+    for channel in channels {
+        let permission_overwrites = if let Some(overwrites) = &channel.permission_overwrites {
+            Some(serde_json::to_value(overwrites)?)
+        } else {
+            None
+        };
+
+        channel_data.push((
+            channel.id as i64,
+            guild_id.map(|id| id as i64),
+            channel.r#type as i32,
+            channel.name.clone(),
+            channel.topic.clone(),
+            channel.nsfw,
+            channel.position.map(|p| p as i32),
+            channel.parent_id.map(|id| id as i64),
+            channel.flags.map(|f| f as i64),
+            permission_overwrites,
+        ));
+    }
+
+    let mut placeholders = Vec::new();
+    let mut values: Vec<&(dyn ToSql + Sync)> = Vec::new();
+    let mut param_index = 1;
+
+    for data in &channel_data {
+        placeholders.push(format!(
+            "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
+            param_index,
+            param_index + 1,
+            param_index + 2,
+            param_index + 3,
+            param_index + 4,
+            param_index + 5,
+            param_index + 6,
+            param_index + 7,
+            param_index + 8,
+            param_index + 9
+        ));
+
+        values.extend_from_slice(&[
+            &data.0, &data.1, &data.2, &data.3, &data.4, &data.5, &data.6, &data.7, &data.8,
+            &data.9,
+        ]);
+
+        param_index += 10;
+    }
+
+    let query = format!(
+        "INSERT INTO channels (
+            id, guild_id, type, name, topic, nsfw, position,
+            parent_id, flags, permission_overwrites
+        ) VALUES {}
+        ON CONFLICT (id) DO UPDATE SET
+            guild_id = EXCLUDED.guild_id,
+            type = EXCLUDED.type,
+            name = EXCLUDED.name,
+            topic = EXCLUDED.topic,
+            nsfw = EXCLUDED.nsfw,
+            position = EXCLUDED.position,
+            parent_id = EXCLUDED.parent_id,
+            flags = EXCLUDED.flags,
+            permission_overwrites = EXCLUDED.permission_overwrites",
+        placeholders.join(", ")
+    );
+
+    db.execute(&query, &values).await?;
+    Ok(())
+}
+
+pub async fn delete_guild_channels(
+    guild_id: u64,
+    db: &Client,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let sql_guild_id: i64 = guild_id as i64;
+    db.execute("DELETE FROM channels WHERE guild_id = $1", &[&sql_guild_id])
+        .await?;
+
+    Ok(())
+}
+
+pub async fn delete_guild_roles(
+    guild_id: u64,
+    db: &Client,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let sql_guild_id: i64 = guild_id as i64;
+    db.execute("DELETE FROM roles WHERE guild_id = $1", &[&sql_guild_id])
+        .await?;
 
     Ok(())
 }

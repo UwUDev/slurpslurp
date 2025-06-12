@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS messages
 (
     id                    BIGINT PRIMARY KEY,
     channel_id            BIGINT      NOT NULL,
-    author_id                BIGINT      NOT NULL REFERENCES users (id),
+    author_id             BIGINT      NOT NULL REFERENCES users (id),
     guild_id              BIGINT,
     content               TEXT,
     edited_at             TIMESTAMPTZ,
@@ -33,3 +33,52 @@ CREATE TABLE IF NOT EXISTS messages
 
 CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages (channel_id);
 CREATE INDEX IF NOT EXISTS idx_messages_guild ON messages (guild_id);
+
+CREATE TABLE IF NOT EXISTS guilds
+(
+    id                       BIGINT PRIMARY KEY,
+    name                     TEXT,
+    icon                     TEXT,
+    region                   TEXT,
+    owner_id                 BIGINT,
+    member_count             INTEGER,
+    features                 TEXT[],
+    premium_tier             INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_guilds_id ON guilds (id);
+
+CREATE TABLE IF NOT EXISTS roles
+(
+    id                  BIGINT,
+    guild_id            BIGINT NOT NULL REFERENCES guilds (id) ON DELETE CASCADE,
+    name                TEXT,
+    color               INTEGER,
+    hoist               BOOLEAN,
+    position            INTEGER,
+    permissions         TEXT,
+    flags               BIGINT,
+    icon                TEXT,
+    unicode_emoji       TEXT,
+    description         TEXT,
+    PRIMARY KEY (id, guild_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_roles_guild ON roles (guild_id);
+
+CREATE TABLE IF NOT EXISTS channels
+(
+    id                          BIGINT PRIMARY KEY,
+    guild_id                    BIGINT REFERENCES guilds (id) ON DELETE CASCADE,
+    type                        INTEGER NOT NULL,
+    name                        TEXT,
+    topic                       TEXT,
+    nsfw                        BOOLEAN,
+    position                    INTEGER,
+    parent_id                   BIGINT,
+    flags                       BIGINT,
+    permission_overwrites       JSONB DEFAULT '[]'::JSONB
+);
+
+CREATE INDEX IF NOT EXISTS idx_channels_guild ON channels (guild_id);
+CREATE INDEX IF NOT EXISTS idx_channels_parent ON channels (parent_id);
