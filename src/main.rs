@@ -104,6 +104,3 @@ async fn main() -> BoxedResult<()> {
 
     Ok(())
 }
-
-// delay for asking 1000 most recent guild joins (10 minutes)
-const REQUEST_DELAY: Duration = Duration::from_secs(600);

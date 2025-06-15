@@ -1,14 +1,8 @@
-use crate::event_processor::guild::{
-    process_channel_create, process_channel_delete, process_channel_update, process_ready_guilds,
-    process_role_create, process_role_delete, process_role_update,
-};
-use crate::event_processor::message::{
-    process_message_create, process_message_delete, process_message_delete_bulk,
-    process_message_update,
-};
-use crate::event_processor::misc::process_ready_supplemental;
-use crate::event_processor::user::process_guild_members_chunk;
-use crate::{BoxedResult, REQUEST_DELAY};
+use crate::BoxedResult;
+use crate::event_processor::guild::*;
+use crate::event_processor::message::*;
+use crate::event_processor::misc::*;
+use crate::event_processor::user::*;
 use discord_client_gateway::events::Event;
 use discord_client_gateway::gateway::GatewayClient;
 use log::{debug, error, info, warn};
@@ -17,6 +11,9 @@ use std::sync::{Arc, atomic};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio_postgres::Client;
+
+// delay for asking 1000 most recent guild joins (10 minutes)
+const REQUEST_DELAY: Duration = Duration::from_secs(600);
 
 pub async fn handle_account(
     token: String,
@@ -135,6 +132,14 @@ pub async fn handle_account(
                     if let Err(e) = process_guild_members_chunk(&members_chunk, &db_client).await {
                         error!(
                             "Account {} : Error processing guild members chunk: {}",
+                            account_index, e
+                        );
+                    }
+                }
+                Ok(Event::GuildMemberUpdate(member_update)) => {
+                    if let Err(e) = process_guild_member_update(&member_update, &db_client).await {
+                        error!(
+                            "Account {} : Error processing guild member update: {}",
                             account_index, e
                         );
                     }
