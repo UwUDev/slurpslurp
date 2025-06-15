@@ -39,6 +39,15 @@ async fn process_message_common(
         if let Err(e) = upsert_message(msg, guild_id, &db_client).await {
             error!("Failed to save message: {}", e);
         }
+
+        if let Some(mentions) = &msg.mentions {
+            for mention in mentions {
+                if let Err(e) = upsert_user(mention, &db_client, guild_id).await {
+                    error!("Failed to upsert mention user: {}", e);
+                }
+            }
+            println!("Added {} mentions to the database", mentions.len());
+        }
     }
 
     // spawn a task to download attachments

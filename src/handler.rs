@@ -144,6 +144,26 @@ pub async fn handle_account(
                         );
                     }
                 }
+                Ok(Event::GuildBanAdd(guild_ban_add)) => {
+                    warn!(
+                        "Guild {} banned user {}",
+                        guild_ban_add.guild_id, guild_ban_add.user.id
+                    );
+                    // create debug file with banned user
+                    let file_name = format!("banned_user_{}.txt", guild_ban_add.guild_id);
+                    if let Err(e) = std::fs::write(
+                        file_name,
+                        format!(
+                            "Guild ID: {}\nUser ID: {}\nUsername: {}",
+                            guild_ban_add.guild_id,
+                            guild_ban_add.user.id,
+                            guild_ban_add.user.username,
+                        ),
+                    ) {
+                        error!("Failed to write banned user file: {}", e);
+                    }
+                }
+
                 Err(e) => {
                     error!("Event error account {}: {}", account_index, e);
                     // if client error (Connect) break the loop to reconnect
