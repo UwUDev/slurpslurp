@@ -3,11 +3,13 @@ mod database;
 mod downloader;
 mod guild;
 mod message;
+mod user;
 
 use crate::config::Config;
 use crate::database::{bulk_upsert_users, connect_db};
 use crate::guild::*;
 use crate::message::*;
+use crate::user::process_guild_members_chunk;
 use discord_client_gateway::events::Event;
 use discord_client_gateway::events::structs::ready::ReadySupplementalEvent;
 use discord_client_gateway::gateway::GatewayClient;
@@ -15,7 +17,9 @@ use discord_client_rest::rest::RestClient;
 use discord_client_structs::structs::user::User;
 use log::{debug, error, info, warn};
 use std::error::Error;
-use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, atomic};
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio_postgres::Client;
 
@@ -98,7 +102,7 @@ async fn main() -> BoxedResult<()> {
 
         handles.push(handle);
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
     }
 
     for handle in handles {
@@ -109,6 +113,9 @@ async fn main() -> BoxedResult<()> {
 
     Ok(())
 }
+
+// delay for asking 1000 most recent guild joins (10 minutes)
+const REQUEST_DELAY: Duration = Duration::from_secs(600);
 
 async fn handle_account(
     token: String,
@@ -126,11 +133,14 @@ async fn handle_account(
 
         info!("Account {} connected successfully", account_index);
 
+        let mut last_request = Instant::now();
+        let ids: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let id_index: AtomicUsize = AtomicUsize::new(0);
+
         loop {
             let event = gateway_client.next_event().await;
             match event {
                 Ok(Event::Ready(ready)) => {
-                    let mut ids: Vec<u64> = Vec::new();
                     let guilds = ready.guilds;
 
                     if let Some(ref db) = db_client {
@@ -139,14 +149,23 @@ async fn handle_account(
                             .await?;
                     }
 
+                    ids.lock().await.clear();
+
                     for guild in guilds {
                         let guild_id = guild.id;
-                        ids.push(guild_id);
+                        ids.lock().await.push(guild_id);
                     }
 
-                    let count = ids.len();
-                    gateway_client.bulk_guild_subscribe(ids).await?;
+                    let count = ids.lock().await.len();
+                    gateway_client
+                        .bulk_guild_subscribe(ids.lock().await.clone())
+                        .await
+                        .map_err(|e| format!("Error subscribing to guilds: {}", e))?;
                     debug!("Account {} : Subscribed to {} guilds", account_index, count);
+
+                    if count > id_index.load(atomic::Ordering::Relaxed) {
+                        id_index.store(0, atomic::Ordering::Relaxed);
+                    }
                 }
                 Ok(Event::ReadySupplemental(ready_supplemental)) => {
                     if let Some(ref db) = db_client {
@@ -211,16 +230,48 @@ async fn handle_account(
                         error!("Account {} : Error deleting role: {}", account_index, e);
                     }
                 }
+                Ok(Event::GuildMembersChunk(members_chunk)) => {
+                    if let Err(e) = process_guild_members_chunk(&members_chunk, &db_client).await {
+                        error!(
+                            "Account {} : Error processing guild members chunk: {}",
+                            account_index, e
+                        );
+                    }
+                }
                 Err(e) => {
                     error!("Event error account {}: {}", account_index, e);
                     // if client error (Connect) break the loop to reconnect
                     if e.to_string().contains("client error (Connect)") {
                         info!("Reconnecting account {} in 5 seconds...", account_index);
-                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                        tokio::time::sleep(Duration::from_secs(5)).await;
                         break;
                     }
                 }
                 _ => (),
+            }
+
+            if db_client.is_some() {
+                if Instant::now().duration_since(last_request) >= REQUEST_DELAY {
+                    let index = id_index.load(atomic::Ordering::Relaxed);
+                    if let Some(guild_id) = ids.lock().await.get(index) {
+                        if let Err(e) = gateway_client
+                            .search_recent_members(*guild_id, "", None, None)
+                            .await
+                        {
+                            error!(
+                                "Account {} : Error requesting guild members: {}",
+                                account_index, e
+                            );
+                        }
+                    }
+
+                    if index + 1 >= ids.lock().await.len() {
+                        id_index.store(0, atomic::Ordering::Relaxed);
+                    } else {
+                        id_index.fetch_add(1, atomic::Ordering::Relaxed);
+                    }
+                    last_request = Instant::now();
+                }
             }
         }
     }
@@ -237,7 +288,7 @@ async fn process_ready_supplemental(
             .filter_map(|channel| channel.recipients.clone())
             .flatten()
             .collect();
-        
+
         let mut users: Vec<User> = ready_supplemental
             .clone()
             .merged_members

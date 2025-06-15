@@ -1,7 +1,11 @@
 use crate::BoxedResult;
 use crate::database::*;
-use discord_client_gateway::events::structs::channel::ChannelCreateEvent;
-use discord_client_gateway::events::structs::guild::role::GuildRoleCreateEvent;
+use discord_client_gateway::events::structs::channel::{
+    ChannelCreateEvent, ChannelDeleteEvent, ChannelUpdateEvent,
+};
+use discord_client_gateway::events::structs::guild::role::{
+    GuildRoleCreateEvent, GuildRoleDeleteEvent, GuildRoleUpdateEvent,
+};
 use discord_client_structs::structs::guild::GatewayGuild;
 use discord_client_structs::structs::user::{Member, User};
 use log::{debug, error};
@@ -133,7 +137,7 @@ pub async fn process_channel_create(
 }
 
 pub async fn process_channel_update(
-    channel_update: &discord_client_gateway::events::structs::channel::ChannelUpdateEvent,
+    channel_update: &ChannelUpdateEvent,
     db_client: &Option<Arc<Mutex<Client>>>,
 ) -> BoxedResult<()> {
     if let Some(db_client) = db_client {
@@ -154,7 +158,7 @@ pub async fn process_channel_update(
 }
 
 pub async fn process_channel_delete(
-    channel_delete: &discord_client_gateway::events::structs::channel::ChannelDeleteEvent,
+    channel_delete: &ChannelDeleteEvent,
     db_client: &Option<Arc<Mutex<Client>>>,
 ) -> BoxedResult<()> {
     if let Some(db_client) = db_client {
@@ -200,7 +204,7 @@ pub async fn process_role_create(
 }
 
 pub async fn process_role_update(
-    role_update: &discord_client_gateway::events::structs::guild::role::GuildRoleUpdateEvent,
+    role_update: &GuildRoleUpdateEvent,
     db_client: &Option<Arc<Mutex<Client>>>,
 ) -> BoxedResult<()> {
     if let Some(db_client) = db_client {
@@ -228,7 +232,7 @@ pub async fn process_role_update(
 }
 
 pub async fn process_role_delete(
-    role_delete: &discord_client_gateway::events::structs::guild::role::GuildRoleDeleteEvent,
+    role_delete: &GuildRoleDeleteEvent,
     db_client: &Option<Arc<Mutex<Client>>>,
 ) -> BoxedResult<()> {
     if let Some(db_client) = db_client {
