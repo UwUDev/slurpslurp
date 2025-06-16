@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 discord_client_gateway = "0.2.0"
-discord_client_rest = "0.1.0"
+discord_client_rest = "0.1.1"
 tokio = { version = "1", features = ["full"] }
 serde_json = "1.0.140"
 tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-serde_json-1", "with-chrono-0_4"]}

@@ -4,6 +4,7 @@ mod database;
 mod downloader;
 mod event_processor;
 mod handler;
+mod scraper;
 
 use crate::cli::{Cli, Mode};
 use crate::config::Config;
@@ -66,10 +67,7 @@ async fn main() -> BoxedResult<()> {
             id,
             tokens,
         } => {
-            println!("Scrape mode activated");
-            println!("Target type: {:?}", target_type);
-            println!("ID: {}", id);
-            println!("Tokens: {:?}", tokens);
+            start_scrape(target_type, id, tokens, db_client).await?;
         }
     }
 
@@ -131,6 +129,36 @@ async fn start_sniff(db_client: Option<Arc<Mutex<Client>>>) -> BoxedResult<()> {
         if let Err(e) = handle.await {
             error!("Error in task: {}", e);
         }
+    }
+
+    Ok(())
+}
+
+async fn start_scrape(
+    target_type: scraper::ScrapeType,
+    id: u64,
+    tokens: Vec<String>,
+    db_client: Option<Arc<Mutex<Client>>>,
+) -> BoxedResult<()> {
+    if tokens.is_empty() {
+        error!("No tokens provided for scraping");
+        return Err("No valid tokens".into());
+    }
+
+    info!("Starting scrape mode...");
+
+    let scraper = scraper::Scraper::new(tokens, id, target_type, db_client).await;
+
+    if scraper.bots.is_empty() {
+        error!("No valid bots connected for scraping");
+        return Err("No valid bots".into());
+    }
+
+    info!("Starting scraping with {} bots", scraper.bots.len());
+
+    if let Err(e) = scraper.start().await {
+        error!("Error during scraping: {}", e);
+        return Err(e);
     }
 
     Ok(())

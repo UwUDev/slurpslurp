@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_postgres::Client;
 
-async fn process_message_common(
+pub async fn process_message_common(
     msg: &Message,
     user: &User,
     guild_id: Option<u64>,
@@ -46,7 +46,6 @@ async fn process_message_common(
                     error!("Failed to upsert mention user: {}", e);
                 }
             }
-            println!("Added {} mentions to the database", mentions.len());
         }
     }
 

@@ -1,4 +1,5 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use crate::scraper::ScrapeType;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[clap(name = "slurpslurp", author, version, about, disable_help_flag = true)]
@@ -15,16 +16,10 @@ pub enum Mode {
     Sniff,
     Scrape {
         #[clap(value_enum)]
-        target_type: TargetType,
+        target_type: ScrapeType,
         #[clap(value_parser)]
         id: u64,
         #[clap(value_parser)]
         tokens: Vec<String>,
     },
-}
-
-#[derive(ValueEnum, Clone, Debug)]
-pub enum TargetType {
-    Channel,
-    Guild,
 }
