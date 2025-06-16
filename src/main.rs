@@ -1,18 +1,22 @@
+mod cli;
 mod config;
 mod database;
 mod downloader;
 mod event_processor;
 mod handler;
 
+use crate::cli::{Cli, Mode};
 use crate::config::Config;
 use crate::database::connect_db;
 use crate::handler::handle_account;
+use clap::Parser;
 use discord_client_rest::rest::RestClient;
 use log::{debug, error, info};
 use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
+use tokio_postgres::Client;
 
 type BoxedError = Box<dyn Error + Send + Sync>;
 type BoxedResult<T> = Result<T, BoxedError>;
@@ -24,14 +28,16 @@ async fn main() -> BoxedResult<()> {
         .filter_module("slurpslurp", log::LevelFilter::Debug)
         .init();
 
+    let cli = Cli::parse();
+    if cli.help {
+        todo!("Implement clap-help functionality");
+    }
+
+    let mode = cli.mode.unwrap_or(Mode::Sniff);
+
     if let Err(e) = Config::init() {
         error!("Error initializing config: {}", e);
         std::process::exit(1);
-    }
-
-    if !std::path::Path::new("downloads").exists() {
-        std::fs::create_dir("downloads")?;
-        debug!("Created downloads directory");
     }
 
     let db_client = if Config::get().use_db {
@@ -51,6 +57,31 @@ async fn main() -> BoxedResult<()> {
             .map_err(|e| format!("Error executing setup script: {}", e))?;
 
         debug!("Database setup script executed successfully");
+    }
+
+    match mode {
+        Mode::Sniff => start_sniff(db_client).await?,
+        Mode::Scrape {
+            target_type,
+            id,
+            tokens,
+        } => {
+            println!("Scrape mode activated");
+            println!("Target type: {:?}", target_type);
+            println!("ID: {}", id);
+            println!("Tokens: {:?}", tokens);
+        }
+    }
+
+    Ok(())
+}
+
+async fn start_sniff(db_client: Option<Arc<Mutex<Client>>>) -> BoxedResult<()> {
+    info!("Starting sniff mode...");
+
+    if !std::path::Path::new("downloads").exists() {
+        std::fs::create_dir("downloads")?;
+        debug!("Created downloads directory");
     }
 
     let tokens_content = std::fs::read_to_string("tokens.txt")
