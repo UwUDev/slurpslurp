@@ -147,9 +147,9 @@ async fn start_scrape(
     }
 
     info!("Starting scrape mode...");
-    if target_type == ScrapeType::Guild {
+    if target_type == ScrapeType::Guild && tokens.len() < 3 {
         warn!(
-            "Guild scraping is way slower than channel scraping. I'd recommend to run multiple channel scrapers instead."
+            "Guild scraping is way slower than channel scraping with a low amount of tokens. I'd recommend to run multiple channel scrapers instead."
         );
     }
 

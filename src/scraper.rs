@@ -56,7 +56,8 @@ impl Scraper {
         let mut bot_index = 0;
         let mut last_message_id: Option<u64> = None;
         let mut progress_bar_initialized = false;
-        let mut offset = 0;
+        let mut progress = 0;
+        let mut last_id: u64 = (chrono::Utc::now().timestamp_millis() << 22) as u64;
         loop {
             if bot_index >= self.bots.len() {
                 bot_index = 0;
@@ -115,7 +116,7 @@ impl Scraper {
                 ScrapeType::Guild => {
                     let guild_rest = bot.guild(Some(self.id));
                     let query = MessageSearchQueryBuilder::default()
-                        .offset(offset as u16)
+                        .max_id(last_id)
                         .include_nsfw(true)
                         .build()?;
 
@@ -131,6 +132,12 @@ impl Scraper {
 
                     let count = messages.len();
 
+                    last_id = messages
+                        .iter()
+                        .min_by_key(|m| m.id)
+                        .map(|m| m.id)
+                        .unwrap_or_default();
+
                     if Config::get().skip_bot_messages {
                         messages = messages
                             .into_iter()
@@ -138,9 +145,9 @@ impl Scraper {
                             .collect();
                     }
 
-                    offset += count;
+                    progress += count;
 
-                    set_progress_bar_progress(offset);
+                    set_progress_bar_progress(progress);
 
                     if count == 0 {
                         print_progress_bar_info(
