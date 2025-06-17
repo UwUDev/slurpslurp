@@ -10,9 +10,10 @@ use crate::cli::{Cli, Mode};
 use crate::config::Config;
 use crate::database::connect_db;
 use crate::handler::handle_account;
+use crate::scraper::*;
 use clap::Parser;
 use discord_client_rest::rest::RestClient;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
@@ -135,7 +136,7 @@ async fn start_sniff(db_client: Option<Arc<Mutex<Client>>>) -> BoxedResult<()> {
 }
 
 async fn start_scrape(
-    target_type: scraper::ScrapeType,
+    target_type: ScrapeType,
     id: u64,
     tokens: Vec<String>,
     db_client: Option<Arc<Mutex<Client>>>,
@@ -146,8 +147,13 @@ async fn start_scrape(
     }
 
     info!("Starting scrape mode...");
+    if target_type == ScrapeType::Guild {
+        warn!(
+            "Guild scraping is way slower than channel scraping. I'd recommend to run multiple channel scrapers instead."
+        );
+    }
 
-    let scraper = scraper::Scraper::new(tokens, id, target_type, db_client).await;
+    let scraper = Scraper::new(tokens, id, target_type, db_client).await;
 
     if scraper.bots.is_empty() {
         error!("No valid bots connected for scraping");
