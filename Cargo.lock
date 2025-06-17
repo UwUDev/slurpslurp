@@ -765,8 +765,7 @@ dependencies = [
 [[package]]
 name = "discord_client_gateway"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ca444687849f8d0540e547223c6ce60aa975d29dcf1558ec5ab203e3e40d1a8"
+source = "git+https://github.com/UwUDev/discord-client-rs.git#b788e57380e67cefae717f79c4c0c828ea21abf7"
 dependencies = [
  "chrono",
  "discord_client_macros",
@@ -784,8 +783,7 @@ dependencies = [
 [[package]]
 name = "discord_client_macros"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45389a117d4ce42a07d69aaa64c92de52cb5477b63748175b00c2448b1bf3601"
+source = "git+https://github.com/UwUDev/discord-client-rs.git#b788e57380e67cefae717f79c4c0c828ea21abf7"
 dependencies = [
  "chrono",
  "convert_case 0.8.0",
@@ -798,8 +796,7 @@ dependencies = [
 [[package]]
 name = "discord_client_rest"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dd976359de2ac1bf694fcc1e12899a7f6bade2781f166c66149b4f5254de1ee"
+source = "git+https://github.com/UwUDev/discord-client-rs.git#b788e57380e67cefae717f79c4c0c828ea21abf7"
 dependencies = [
  "base64",
  "chrono",
@@ -821,8 +818,7 @@ dependencies = [
 [[package]]
 name = "discord_client_structs"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02d655940d390b17acdfadada8228f10b0171cf538435fbb614acd30cf356563"
+source = "git+https://github.com/UwUDev/discord-client-rs.git#b788e57380e67cefae717f79c4c0c828ea21abf7"
 dependencies = [
  "base64",
  "chrono",
@@ -1843,6 +1839,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "progress_bar"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "955f6029e49ac8b5a692b0426ba78d8862edd4b2f98526920d1c7dc9d1edeef1"
+
+[[package]]
 name = "psl-types"
 version = "2.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2201,6 +2203,7 @@ dependencies = [
  "mime",
  "mime_guess",
  "pretty_env_logger",
+ "progress_bar",
  "rquest",
  "rquest-util",
  "sanitise-file-name",

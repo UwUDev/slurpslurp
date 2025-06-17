@@ -4,12 +4,12 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-discord_client_gateway = "0.2.0"
-discord_client_rest = "0.1.1"
+discord_client_gateway = { git = "https://github.com/UwUDev/discord-client-rs.git" }
+discord_client_rest = { git = "https://github.com/UwUDev/discord-client-rs.git" }
+discord_client_structs = { git = "https://github.com/UwUDev/discord-client-rs.git" }
 tokio = { version = "1", features = ["full"] }
 serde_json = "1.0.140"
 tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-serde_json-1", "with-chrono-0_4"]}
-discord_client_structs = "0.2.0"
 rquest = { version = "5.1.0", features = ["gzip", "deflate", "zstd", "brotli"] }
 rquest-util = "2.2.1"
 log = "0.4"
@@ -25,3 +25,4 @@ serde = { version = "1.0.219", features = ["derive"] }
 toml = "0.8.23"
 clap = "4.5.40"
 clap-help = "1.4.0"
+progress_bar = "1.2.1"
