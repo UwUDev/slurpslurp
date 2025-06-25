@@ -1,400 +1,308 @@
 import psycopg2
 import json
-import re
 import argparse
 import sys
 import random
 from tqdm import tqdm
-from datetime import datetime, timedelta
 
 MAX_INPUT_CHARS = 35000
 MAX_OUTPUT_CHARS = 5000
-MIN_VALIDATION_EXAMPLES = 10
-MAX_VALIDATION_EXAMPLES = 5000
-MIN_PAIRS_FOR_SPLIT = 20
-MAX_CONTEXT_MESSAGES = 5
-CONTEXT_TIME_LIMIT_MINUTES = 30
+MAX_CHAIN_LENGTH = 10
+MAX_CHAINS = 100
 
-
-def preprocess_text(text: str, allowed_users: set = None) -> str:
+def preprocess_text(text: str, author_id_to_role: dict = None) -> str:
     if not isinstance(text, str):
         return ""
-    if allowed_users:
-        text = re.sub(
-            r"<@!?(\d+)>",
-            lambda m: m.group(0) if m.group(1) in allowed_users else "@user",
-            text,
-        )
+
+    import re
+
+    if author_id_to_role:
+        def replace_mention(match):
+            mentioned_id = match.group(1)
+            if mentioned_id in author_id_to_role:
+                return f"@{author_id_to_role[mentioned_id]}"
+            else:
+                return ""
+
+        text = re.sub(r"<@!?(\d+)>", replace_mention, text)
     else:
         text = re.sub(r"<@!?\d+>", "@user", text)
 
-    # Unknown users and roles
     text = re.sub(r"<@&\d+>", "@role", text)
     text = re.sub(r"<#\d+>", "#channel", text)
 
-    # Disallow URLs
     if re.search(r"https?://\S+", text):
         return ""
 
-    # Disallow code blocks (to avoid people asking "CaN yOu Do My HoMeWoRk?")
     if re.search(r"``````", text, flags=re.DOTALL):
         return ""
 
-    # Remove custom Discord emojis
-    text = re.sub(r":[a-zA-Z0-9-_]{3,32}:", "", text)
+    text = re.sub(r"<:[a-zA-Z0-9-_]{2,32}:\d+>", "", text)
 
-    # Remove Markdown formatting etc..
-    text = re.sub(r"(\*\*|__|\*|_|~~)(.*?)\1", r"\2", text)
-    text = re.sub(r"<a?:(\w+):\d+>", r":\1:", text)
     text = re.sub(r"\s+", " ", text).strip()
 
     return text
 
+def assign_last_speaker_as_assistant(messages):
+    if not messages:
+        return messages
 
-def is_meaningful_exchange(input_text: str, output_text: str) -> bool:
-    if len(output_text.split()) < 3:
-        return False
+    assistant_already_exists = any(msg["role"] == "assistant" for msg in messages)
 
-    # Messages with only special characters or numbers are useless
-    reaction_patterns = [r'^[!@#$%^&*()_+\-=\[\]{};:"\\|,.<>\/?]+$', r"^[0-9]+$"]
+    last_role = messages[-1]["role"]
 
-    if any(
-        re.match(pattern, output_text.lower().strip()) for pattern in reaction_patterns
-    ):
-        return False
+    if assistant_already_exists:
+        messages[-1]["role"] = "assistant"
+    else:
+        for msg in messages:
+            if msg["role"] == last_role:
+                msg["role"] = "assistant"
 
-    if input_text.lower().strip() == output_text.lower().strip():
-        return False
+    return messages
 
-    return True
-
-
-def get_conversation_context(
-    cursor,
-    message_id: int,
-    channel_id: int,
-    message_timestamp,
-    max_context: int = MAX_CONTEXT_MESSAGES,
-) -> list:
-    time_limit = message_timestamp - timedelta(minutes=CONTEXT_TIME_LIMIT_MINUTES)
-
-    query = """
-    SELECT content, author_id, created_at
-    FROM messages
-    WHERE channel_id = %s
-    AND id < %s
-    AND content IS NOT NULL
-    AND content != ''
-    AND created_at >= %s
-    ORDER BY id DESC
-    LIMIT %s
-    """
-    cursor.execute(query, (channel_id, message_id, time_limit, max_context))
-    return list(reversed(cursor.fetchall()))
-
-
-def get_conversation_participants(
-    context_messages: list, input_author_id: str, output_author_id: str
-) -> set:
-    participants = {str(input_author_id), str(output_author_id)}
-
-    for _, author_id, _ in context_messages:
-        participants.add(str(author_id))
-
-    return participants
-
-
-def get_extended_context(
-    cursor,
-    message_id: int,
-    channel_id: int,
-    message_timestamp,
-    invalid_messages: set,
-    max_context: int = MAX_CONTEXT_MESSAGES,
-) -> list:
-
-    time_limit = message_timestamp - timedelta(minutes=CONTEXT_TIME_LIMIT_MINUTES)
-
-    extended_limit = max_context * 2
-
-    query = """
-    SELECT content, author_id, created_at, id
-    FROM messages
-    WHERE channel_id = %s
-    AND id < %s
-    AND content IS NOT NULL
-    AND content != ''
-    AND created_at >= %s
-    ORDER BY id DESC
-    LIMIT %s
-    """
-
-    cursor.execute(query, (channel_id, message_id, time_limit, extended_limit))
-    all_potential_messages = list(reversed(cursor.fetchall()))
-
-    valid_context = []
-    for msg_content, author_id, timestamp, msg_id in all_potential_messages:
-        if msg_id in invalid_messages:
-            continue
-
-        processed_msg = preprocess_text(msg_content)
-        if processed_msg and len(processed_msg.split()) >= 2:
-            valid_context.append((msg_content, author_id, timestamp))
-
-        if len(valid_context) >= max_context:
-            break
-
-    return valid_context
-
-
-def get_message_pairs_from_db(db_dsn: str) -> list:
+def get_reply_chains(db_dsn: str, min_chain_length: int = 2) -> list:
     print(f"[*] Connecting to PostgreSQL database...")
+
     try:
         with psycopg2.connect(db_dsn) as conn:
             with conn.cursor() as cursor:
                 query = """
+                WITH RECURSIVE reply_chains AS (
+                    SELECT
+                        m.id,
+                        m.channel_id,
+                        m.author_id,
+                        m.content,
+                        u.username,
+                        m.id as root_id,
+                        1 as depth,
+                        ARRAY[m.id] as chain_path,
+                        ARRAY[m.id] as msg_ids,
+                        ARRAY[m.author_id] as author_ids,
+                        ARRAY[u.username] as usernames,
+                        ARRAY[m.content] as contents
+                    FROM messages m
+                    JOIN users u ON m.author_id = u.id
+                    WHERE m.referenced_message_id IS NULL
+                      AND m.content IS NOT NULL
+                      AND length(trim(m.content)) > 0
+                      AND m.deleted_at IS NULL
+
+                    UNION ALL
+
+                    SELECT
+                        reply.id,
+                        reply.channel_id,
+                        reply.author_id,
+                        reply.content,
+                        reply_user.username,
+                        rc.root_id,
+                        rc.depth + 1,
+                        rc.chain_path || reply.id,
+                        rc.msg_ids || reply.id,
+                        rc.author_ids || reply.author_id,
+                        rc.usernames || reply_user.username,
+                        rc.contents || reply.content
+                    FROM messages reply
+                    JOIN users reply_user ON reply.author_id = reply_user.id
+                    JOIN reply_chains rc ON reply.referenced_message_id = rc.id
+                    WHERE reply.content IS NOT NULL
+                      AND length(trim(reply.content)) > 0
+                      AND reply.deleted_at IS NULL
+                      AND rc.depth < %s
+                      AND NOT (reply.id = ANY(rc.chain_path))
+                )
                 SELECT
-                    original_msg.id,
-                    original_msg.channel_id,
-                    original_msg.content AS input_text,
-                    original_msg.author_id AS input_author_id,
-                    original_msg.created_at AS input_timestamp,
-                    reply_msg.content AS output_text,
-                    reply_msg.author_id AS output_author_id
-                FROM
-                    messages AS reply_msg
-                JOIN
-                    messages AS original_msg
-                ON
-                    reply_msg.referenced_message_id = original_msg.id
-                WHERE
-                    reply_msg.content IS NOT NULL AND reply_msg.content != '' AND
-                    original_msg.content IS NOT NULL AND original_msg.content != ''
-                ORDER BY original_msg.created_at DESC;
+                    root_id,
+                    channel_id,
+                    depth,
+                    msg_ids,
+                    author_ids,
+                    usernames,
+                    contents
+                FROM reply_chains
+                WHERE depth >= %s  -- Use the min_chain_length parameter
+                ORDER BY root_id, depth DESC
+                LIMIT %s;
                 """
-                cursor.execute(query)
-                pairs = cursor.fetchall()
-                print(f"[+] {len(pairs)} pairs of messages found in the database.")
-                return pairs
+
+                cursor.execute(query, (MAX_CHAIN_LENGTH, min_chain_length, MAX_CHAINS * 2))
+                chains = cursor.fetchall()
+
+                print(f"[+] {len(chains)} chains of at least {min_chain_length} messages found.")
+                return chains
+
     except psycopg2.Error as e:
-        print(f"[ERROR] PostgreSQL database error : {e}", file=sys.stderr)
+        print(f"[ERROR] PostgreSQL error: {e}", file=sys.stderr)
         sys.exit(1)
 
-
-def determine_message_role(author_id: str, target_bot_id: str = None) -> str:
-    if target_bot_id and str(author_id) == str(target_bot_id):
-        return "model"
-    return "user"
-
-
-# Basically learn how to ping users based on the context
-def create_contextual_record(
-    message_data: tuple, context_messages: list, target_bot_id: str = None
-) -> tuple:
-    (
-        msg_id,
-        channel_id,
-        input_content,
-        input_author_id,
-        input_timestamp,
-        output_content,
-        output_author_id,
-    ) = message_data
-
-    participants = get_conversation_participants(
-        context_messages, input_author_id, output_author_id
-    )
-
-    conversation_text_parts = []
-    total_chars = 0
-
-    for msg_content, author_id, timestamp in context_messages:
-        processed_msg = preprocess_text(msg_content, participants)
-        if processed_msg:
-            formatted_msg = f"<@{author_id}>: {processed_msg}"
-            if total_chars + len(formatted_msg) < MAX_INPUT_CHARS:
-                conversation_text_parts.append(formatted_msg)
-                total_chars += len(formatted_msg)
-
-    processed_input = preprocess_text(input_content, participants)
-    processed_output = preprocess_text(output_content, participants)
-
-    if processed_input:
-        formatted_input = f"<@{input_author_id}>: {processed_input}"
-        if total_chars + len(formatted_input) < MAX_INPUT_CHARS:
-            conversation_text_parts.append(formatted_input)
-            total_chars += len(formatted_input)
-
-    full_conversation = "\n".join(conversation_text_parts)
-
-    conversation_parts = []
-    if full_conversation:
-        conversation_parts.append(
-            {"role": "user", "parts": [{"text": full_conversation}]}
-        )
-
-    if processed_output:
-        conversation_parts.append(
-            {"role": "model", "parts": [{"text": processed_output}]}
-        )
-
-    return {"contents": conversation_parts}, total_chars + len(processed_output)
-
-
-def write_contextual_pairs_to_jsonl(
-    pairs: list,
-    output_filepath: str,
-    description: str,
-    db_dsn: str,
-    target_bot_id: str = None,
-):
-    print(f"[*] Write {len(pairs)} pairs with Discord mentions in {output_filepath}...")
-    valid_records_count = 0
-
+def create_conversation_record(chain_data: tuple) -> dict:
     try:
-        with psycopg2.connect(db_dsn) as conn:
-            with conn.cursor() as cursor:
-                with open(output_filepath, "w", encoding="utf-8") as f:
-                    for pair_data in tqdm(pairs, desc=description):
-                        if len(pair_data) < 7:
-                            continue
+        root_id, channel_id, depth, msg_ids, author_ids, usernames, contents = chain_data
 
-                        (
-                            msg_id,
-                            channel_id,
-                            input_content,
-                            input_author_id,
-                            input_timestamp,
-                            output_content,
-                            output_author_id,
-                        ) = pair_data
+        messages = []
+        person_mapping = {}
+        person_counter = 0
 
-                        processed_input = preprocess_text(input_content)
-                        processed_output = preprocess_text(output_content)
+        if len(msg_ids) != len(author_ids) or len(author_ids) != len(usernames) or len(usernames) != len(contents):
+            return None
 
-                        if not processed_input or not processed_output:
-                            continue
+        for i in range(len(msg_ids)):
+            author_id = author_ids[i]
 
-                        if not is_meaningful_exchange(
-                            processed_input, processed_output
-                        ):
-                            continue
+            if author_id not in person_mapping:
+                person_mapping[author_id] = f"Person{chr(65 + person_counter)}"
+                person_counter += 1
 
-                        if len(processed_output) > MAX_OUTPUT_CHARS:
-                            continue
+        author_id_to_role = {str(author_id): role for author_id, role in person_mapping.items()}
 
-                        context_messages = get_conversation_context(
-                            cursor, msg_id, channel_id, input_timestamp
-                        )
+        for i in range(len(msg_ids)):
+            author_id = author_ids[i]
+            username = usernames[i]
+            content = contents[i]
 
-                        try:
-                            json_record, total_length = create_contextual_record(
-                                pair_data, context_messages, target_bot_id
-                            )
+            processed_content = preprocess_text(content, author_id_to_role)
+            if not processed_content or len(processed_content.strip()) < 2:
+                continue
 
-                            if (
-                                total_length <= MAX_INPUT_CHARS
-                                and json_record["contents"]
-                            ):
-                                f.write(
-                                    json.dumps(json_record, ensure_ascii=False) + "\n"
-                                )
-                                valid_records_count += 1
+            role = person_mapping[author_id]
 
-                        except Exception as e:
-                            continue
+            messages.append({
+                "role": role,
+                "content": processed_content
+            })
 
-    except psycopg2.Error as e:
-        print(f"[ERROR] Database error : {e}", file=sys.stderr)
-        return
+        if len(messages) < 2:
+            return None
 
-    print(f"[+] {valid_records_count} valid records written to {output_filepath}.")
+        messages = assign_last_speaker_as_assistant(messages)
 
+        final_author_id_to_role = {}
+        for i, msg in enumerate(messages):
+            original_author_id = str(author_ids[i])
+            final_author_id_to_role[original_author_id] = msg["role"]
 
-def generate_datasets(
+        if final_author_id_to_role != author_id_to_role:
+            for i, msg in enumerate(messages):
+                original_content = contents[i]
+                reprocessed_content = preprocess_text(original_content, final_author_id_to_role)
+                if reprocessed_content and len(reprocessed_content.strip()) >= 2:
+                    msg["content"] = reprocessed_content
+
+        total_length = sum(len(msg["content"]) for msg in messages)
+        if total_length > MAX_INPUT_CHARS:
+            return None
+
+        return {"messages": messages}
+
+    except Exception as e:
+        return None
+
+def write_chains_to_jsonl(chains: list, output_filepath: str):
+    """Writes conversation chains to JSONL format"""
+    print(f"[*] Writing {len(chains)} chains to {output_filepath}...")
+
+    valid_records_count = 0
+    unique_chains = {}
+
+    with open(output_filepath, "w", encoding="utf-8") as f:
+        for chain_data in tqdm(chains, desc="Processing chains"):
+            try:
+                record = create_conversation_record(chain_data)
+                if record and len(record["messages"]) >= 2:
+                    root_id = chain_data[0]
+                    if root_id not in unique_chains:
+                        unique_chains[root_id] = record
+                        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                        valid_records_count += 1
+
+                        # Debug: display some examples
+                        if valid_records_count <= 3:
+                            print(f"[DEBUG] Example chain #{valid_records_count}:")
+                            for msg in record['messages']:
+                                print(f"  - {msg['role']}: {msg['content'][:50]}...")
+
+                        if valid_records_count >= MAX_CHAINS:
+                            break
+
+            except Exception as e:
+                continue
+
+    print(f"[+] {valid_records_count} valid chains written to {output_filepath}.")
+
+def generate_reply_chains_dataset(
     db_dsn: str,
-    train_path: str,
-    valid_path: str,
-    split_ratio: float,
-    target_bot_id: str = None,
+    output_path: str,
+    max_chains: int = MAX_CHAINS,
+    min_chain_length: int = 2
 ):
-    all_pairs = get_message_pairs_from_db(db_dsn)
+    global MAX_CHAINS
+    MAX_CHAINS = max_chains
 
-    if len(all_pairs) < MIN_PAIRS_FOR_SPLIT:
-        print(f"\n[WARNING] Less than {MIN_PAIRS_FOR_SPLIT} pairs found.")
-        print("[WARNING] All data will be written to the training file only.")
-        write_contextual_pairs_to_jsonl(
-            all_pairs, train_path, "Training", db_dsn, target_bot_id
-        )
-        open(valid_path, "w").close()
+    chains = get_reply_chains(db_dsn, min_chain_length)
+
+    if not chains:
+        print(f"[WARNING] No chains of at least {min_chain_length} messages found.")
         return
 
-    random.shuffle(all_pairs)
-
-    num_validation = int(len(all_pairs) * split_ratio)
-    num_validation = max(
-        MIN_VALIDATION_EXAMPLES, min(num_validation, MAX_VALIDATION_EXAMPLES)
-    )
-
-    if num_validation >= len(all_pairs):
-        num_validation = len(all_pairs) - MIN_VALIDATION_EXAMPLES
-
-    validation_pairs = all_pairs[:num_validation]
-    training_pairs = all_pairs[num_validation:]
-
-    print(
-        f"\n[INFO] {len(training_pairs)} pairs for training, {len(validation_pairs)} for validation"
-    )
-    print("---")
-    write_contextual_pairs_to_jsonl(
-        training_pairs, train_path, "Training set", db_dsn, target_bot_id
-    )
-    print("---")
-    write_contextual_pairs_to_jsonl(
-        validation_pairs, valid_path, "Training set", db_dsn, target_bot_id
-    )
-    print("\n[SUCCESS] Operation completed with dynamic extended context.")
+    write_chains_to_jsonl(chains, output_path)
+    print(f"\n[SUCCESS] Dataset generated successfully: {output_path}")
+    print(f"[INFO] Chains with at least {min_chain_length} messages")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Prepares Discord data with dynamic extended context for fine-tuning Gemini or other trainable models with jsonb.",
+        description="Generates a dataset of Discord reply chains in multi-character JSONL format with smart mentions.",
         formatter_class=argparse.RawTextHelpFormatter,
     )
+
     parser.add_argument(
         "db_dsn",
-        help="Connection string (DSN) PostgreSQL.\nFormat: postgresql://user:pass@host:port/db",
+        help="PostgreSQL connection string.\nFormat: postgresql://user:pass@host:port/db",
     )
-    parser.add_argument("training_output_file", help="Path to JSONL file for training.")
+
     parser.add_argument(
-        "validation_output_file", help="Path to JSONL file for validation."
+        "output_file",
+        help="Path to the output JSONL file."
     )
+
     parser.add_argument(
-        "--split-ratio", type=float, default=0.1, help="Validation ratio (default: 0.1)"
-    )
-    parser.add_argument(
-        "--target-bot-id", type=str, help="Target Discord bot ID (optional)."
-    )
-    parser.add_argument(
-        "--max-context",
+        "--max-chains",
         type=int,
-        default=MAX_CONTEXT_MESSAGES,
-        help=f"Max number of context messages (default: {MAX_CONTEXT_MESSAGES}).",
+        default=MAX_CHAINS,
+        help=f"Maximum number of chains to generate (default: {MAX_CHAINS}).",
+    )
+
+    parser.add_argument(
+        "--max-chain-length",
+        type=int,
+        default=MAX_CHAIN_LENGTH,
+        help=f"Maximum length of a chain (default: {MAX_CHAIN_LENGTH}).",
+    )
+
+    parser.add_argument(
+        "--min-chain-length",
+        type=int,
+        default=2,
+        help="Minimum number of messages required in a chain (default: 2)."
     )
 
     args = parser.parse_args()
 
-    if not 0 < args.split_ratio < 1:
-        print("[ERROR] The split-ratio must be between 0 and 1.", file=sys.stderr)
+    if args.max_chain_length:
+        MAX_CHAIN_LENGTH = args.max_chain_length
+
+    if args.min_chain_length > args.max_chain_length:
+        print(f"[ERROR] min-chain-length ({args.min_chain_length}) cannot be greater than max-chain-length ({args.max_chain_length})", file=sys.stderr)
         sys.exit(1)
 
-    if args.max_context:
-        MAX_CONTEXT_MESSAGES = args.max_context
+    if args.min_chain_length < 2:
+        print(f"[ERROR] min-chain-length must be at least 2", file=sys.stderr)
+        sys.exit(1)
 
-    generate_datasets(
+    generate_reply_chains_dataset(
         args.db_dsn,
-        args.training_output_file,
-        args.validation_output_file,
-        args.split_ratio,
-        args.target_bot_id,
+        args.output_file,
+        args.max_chains,
+        args.min_chain_length
     )
